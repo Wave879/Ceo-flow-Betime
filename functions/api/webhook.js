@@ -641,6 +641,118 @@ function parseMeetingSummaryTaskCandidate(rawText = '') {
     };
 }
 
+const TAGGED_TASK_IGNORED_COMMAND_PREFIXES = [
+    '/test',
+    '/มีชีวิต',
+    '/จบชีวิต',
+    '/ซิงข้อมูลกลุ่ม',
+    '/ซิงค์ข้อมูลกลุ่ม',
+    '/บันทึกข้อมูลกลุ่ม',
+    '/เพิ่มโครงการ'
+];
+
+const TAGGED_TASK_KEYWORDS = [
+    'หารือ',
+    'ประเมิน',
+    'ความเสี่ยง',
+    'สรุป',
+    'นัดหมาย',
+    'nextstep',
+    'next step',
+    'แจ้ง',
+    'ภายใน',
+    'ตามด้วย',
+    'เตรียม',
+    'input',
+    'อินพุต',
+    'อินput',
+    'lead',
+    'ประชุม',
+    'ติดตาม',
+    'ช่วย',
+    'วิเคราะห์',
+    'จัดการ',
+    'ขอ'
+];
+
+function parseTaggedLineTaskCandidate(rawText = '') {
+    const text = normalizeIncomingText(rawText);
+    if (!text) {
+        return { matched: false };
+    }
+
+    const compactText = text.replace(/\s+/g, ' ').trim();
+    if (!compactText) {
+        return { matched: false };
+    }
+
+    const normalizedLower = compactText.toLowerCase();
+    for (const commandPrefix of TAGGED_TASK_IGNORED_COMMAND_PREFIXES) {
+        const normalizedCommandPrefix = String(commandPrefix || '').toLowerCase();
+        if (!normalizedCommandPrefix) {
+            continue;
+        }
+
+        if (normalizedLower === normalizedCommandPrefix || normalizedLower.startsWith(`${normalizedCommandPrefix} `)) {
+            return { matched: false, reason: 'command' };
+        }
+    }
+
+    const dateInfo = parseMeetingDateFromText(compactText);
+    const hasDeadlineSignal = /(?:ภายใน|deadline|due|ก่อนวันที่|ภายในวันที่)/iu.test(compactText)
+        || Boolean(dateInfo?.iso);
+    const hasQuestion = /[?？]/u.test(compactText);
+
+    let keywordHits = 0;
+    for (const keyword of TAGGED_TASK_KEYWORDS) {
+        const normalizedKeyword = String(keyword || '').trim().toLowerCase();
+        if (!normalizedKeyword) {
+            continue;
+        }
+
+        if (normalizedLower.includes(normalizedKeyword)) {
+            keywordHits += 1;
+        }
+    }
+
+    if (!hasDeadlineSignal && !hasQuestion && keywordHits === 0) {
+        return { matched: false, reason: 'no-task-signal' };
+    }
+
+    const ccBoundaryIndex = findCcBoundaryIndex(compactText);
+    const taskSegment = ccBoundaryIndex >= 0
+        ? compactText.slice(0, ccBoundaryIndex).trim()
+        : compactText;
+
+    let title = stripLeadingBotMentions(taskSegment)
+        .replace(/^\/?(?:ai|ask|ถาม|ไอน่า)\s*/iu, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    if (dateInfo?.raw) {
+        title = title.replace(dateInfo.raw, ' ').replace(/[()\[\]]/g, ' ').replace(/\s+/g, ' ').trim();
+    }
+
+    if (!title) {
+        title = 'งานจากข้อความแท็กใน LINE';
+    }
+
+    if (title.length > 180) {
+        title = `${title.slice(0, 177)}...`;
+    }
+
+    return {
+        matched: true,
+        title,
+        deadlineIso: dateInfo?.iso || '',
+        deadlineDisplay: dateInfo?.display || '',
+        rawText: compactText,
+        hasDeadlineSignal,
+        hasQuestion,
+        keywordHits
+    };
+}
+
 const TASK_SENTIMENT_POSITIVE_KEYWORDS = [
     'ขอบคุณ',
     'เรียบร้อย',
@@ -805,7 +917,7 @@ function findCcBoundaryIndex(rawText = '') {
         return -1;
     }
 
-    const match = source.match(/(?:^|\s)(?:cc|copy)(?:\s|[:：]|$)/iu);
+    const match = source.match(/(?:^|\s)(?:cc|copy)(?:\s|[:：]|@|$)/iu);
     if (!match) {
         return -1;
     }
@@ -1101,6 +1213,10 @@ async function tryCreateMeetingSummaryTask(event, env, options = {}) {
     }
 
     const lineMessageId = String(event?.message?.id || '').trim();
+    const quotedMessageId = extractQuotedMessageId(event?.message || {});
+    const lineContextMessageIds = [lineMessageId, quotedMessageId]
+        .map((value) => String(value || '').trim())
+        .filter(Boolean);
     const taskDocId = buildMeetingTaskDocId(lineMessageId);
 
     if (lineMessageId) {
@@ -1140,6 +1256,7 @@ async function tryCreateMeetingSummaryTask(event, env, options = {}) {
         formatIssues: { arrayValue: {} },
         source: fsString('line-meeting-summary'),
         lineMessageId: fsString(lineMessageId),
+        lineContextMessageIds: fsStringArray(lineContextMessageIds),
         lineUserId: fsString(lineUserId),
         createdBy: fsString(lineUserId),
         createdByName: fsString(creatorName || 'สมาชิกในกลุ่ม'),
@@ -1168,6 +1285,211 @@ async function tryCreateMeetingSummaryTask(event, env, options = {}) {
         matched: true,
         created,
         duplicate: false,
+        taskId: taskDocId,
+        deadlineIso: parsedCandidate.deadlineIso,
+        reason: created ? 'created' : 'write-failed'
+    };
+}
+
+const LINE_TASK_SOURCE_TYPES = new Set(['line-meeting-summary', 'line-tagged-task']);
+
+function isSupportedLineTaskSource(source = '') {
+    const normalizedSource = String(source || '').trim().toLowerCase();
+    return LINE_TASK_SOURCE_TYPES.has(normalizedSource);
+}
+
+async function tryCreateTaggedLineTask(event, env, options = {}) {
+    const projectId = String(options?.projectId || '').trim();
+    const lineUserId = String(options?.lineUserId || '').trim();
+    if (!projectId) {
+        return { matched: false, created: false, reason: 'missing-project' };
+    }
+
+    if (!isBotTaggedMeetingSummary(event, env)) {
+        return { matched: false, created: false, reason: 'not-tagged' };
+    }
+
+    const messageText = normalizeIncomingText(event?.message?.text || '');
+    const parsedCandidate = parseTaggedLineTaskCandidate(messageText);
+    if (!parsedCandidate.matched) {
+        return { matched: false, created: false, reason: parsedCandidate.reason || 'not-tasklike' };
+    }
+
+    const lineMessageId = String(event?.message?.id || '').trim();
+    const quotedMessageId = extractQuotedMessageId(event?.message || {});
+    const lineContextMessageIds = [lineMessageId, quotedMessageId]
+        .map((value) => String(value || '').trim())
+        .filter(Boolean);
+
+    if (quotedMessageId) {
+        const quotedTaskDocId = buildMeetingTaskDocId(quotedMessageId);
+        const quotedTaskFields = await fsGetDoc('tasks', quotedTaskDocId, env).catch(() => null);
+        if (quotedTaskFields) {
+            const source = readFirestoreStringField(quotedTaskFields, 'source');
+            if (isSupportedLineTaskSource(source)) {
+                const taskProjectId = readFirestoreStringField(quotedTaskFields, 'projectId');
+                if (taskProjectId && taskProjectId !== projectId) {
+                    return { matched: false, created: false, reason: 'project-mismatch' };
+                }
+
+                const existingTimelineEntries = readFirestoreTimelineEntries(quotedTaskFields, 'timelineEntries');
+                const existingContextMessageIds = readFirestoreStringArrayField(quotedTaskFields, 'lineContextMessageIds');
+                const isDuplicateFollowUp = Boolean(lineMessageId)
+                    && (
+                        existingContextMessageIds.includes(lineMessageId)
+                        || existingTimelineEntries.some((entry) => entry.replyLineMessageId === lineMessageId)
+                    );
+
+                if (isDuplicateFollowUp) {
+                    return {
+                        matched: true,
+                        created: false,
+                        updated: false,
+                        duplicate: true,
+                        followup: true,
+                        taskId: quotedTaskDocId,
+                        reason: 'duplicate-followup'
+                    };
+                }
+
+                const messageType = String(event?.message?.type || '').trim().toLowerCase() || 'text';
+                const followUpText = messageType === 'text'
+                    ? (messageText || buildMessagePreviewText(messageType, event?.message || {}, messageText))
+                    : buildMessagePreviewText(messageType, event?.message || {}, '');
+                const actorName = await resolveSenderDisplayName(lineUserId, projectId, env);
+                const createdAtRaw = Number(event?.timestamp);
+                const nowIso = Number.isFinite(createdAtRaw) && createdAtRaw > 0
+                    ? new Date(createdAtRaw).toISOString()
+                    : new Date().toISOString();
+                const timelineEntryId = lineMessageId
+                    ? `line_followup_${sanitizeDocIdSegment(lineMessageId).slice(0, 64)}`
+                    : `line_followup_${Date.now()}`;
+
+                const nextTimelineEntries = [
+                    ...existingTimelineEntries,
+                    {
+                        id: timelineEntryId,
+                        time: nowIso,
+                        title: 'สั่งต่อจากงานเดิมใน LINE',
+                        detail: followUpText || '-',
+                        actor: actorName || `LINE-${lineUserId.slice(-6)}`,
+                        tone: 'violet',
+                        replyLineMessageId: lineMessageId
+                    }
+                ].slice(-80);
+
+                const nextContextMessageIds = [
+                    ...new Set([
+                        ...existingContextMessageIds,
+                        ...lineContextMessageIds
+                    ].filter(Boolean))
+                ].slice(-120);
+
+                const currentStatus = readFirestoreStringField(quotedTaskFields, 'status');
+                const shouldReopen = currentStatus === 'completed' || currentStatus === 'abandoned';
+
+                const updated = await patchFirestoreDoc(`tasks/${quotedTaskDocId}`, {
+                    timelineEntries: fsTimelineEntriesArray(nextTimelineEntries),
+                    lineContextMessageIds: fsStringArray(nextContextMessageIds),
+                    lastUpdate: fsString(followUpText || '-'),
+                    lastUpdatedAt: { timestampValue: nowIso },
+                    lastUpdatedBy: fsString(lineUserId),
+                    lastUpdatedByName: fsString(actorName || ''),
+                    updatedAt: { timestampValue: nowIso },
+                    updatedBy: fsString(lineUserId),
+                    updatedByName: fsString(actorName || ''),
+                    ...(shouldReopen ? { status: fsString('in-progress') } : {})
+                }, env, false);
+
+                return {
+                    matched: true,
+                    created: false,
+                    updated,
+                    duplicate: false,
+                    followup: true,
+                    taskId: quotedTaskDocId,
+                    reason: updated
+                        ? (shouldReopen ? 'followup-recorded-reopened' : 'followup-recorded')
+                        : 'write-failed'
+                };
+            }
+        }
+    }
+
+    const assigneeMentionLineUserIds = extractMeetingTaskAssigneeLineUserIds(event, env);
+    if (assigneeMentionLineUserIds.length === 0) {
+        return { matched: false, created: false, reason: 'no-assignee-mention' };
+    }
+
+    const taskDocId = buildMeetingTaskDocId(lineMessageId);
+    if (lineMessageId) {
+        const existing = await fsGetDoc('tasks', taskDocId, env).catch(() => null);
+        if (existing) {
+            return {
+                matched: true,
+                created: false,
+                duplicate: true,
+                followup: false,
+                taskId: taskDocId,
+                deadlineIso: parsedCandidate.deadlineIso,
+                reason: 'duplicate'
+            };
+        }
+    }
+
+    const creatorName = await resolveSenderDisplayName(lineUserId, projectId, env);
+    const assigneeInfo = await resolveMeetingTaskAssignees(event, projectId, lineUserId, env);
+    const primaryAssigneeMentionLabel = resolvePrimaryAssigneeMentionLabel(event, assigneeInfo.assigneeLineUserIds);
+    const normalizedTaskTitle = finalizeMeetingSummaryTaskTitle(parsedCandidate.title, primaryAssigneeMentionLabel);
+    const assigneeDisplayName = assigneeInfo.assigneeNames[0] || creatorName || 'ยังไม่ระบุ';
+    const sourceSentiment = analyzeTaskSourceSentiment(parsedCandidate.rawText || messageText);
+    const nowIso = new Date().toISOString();
+
+    const fields = {
+        id: fsString(taskDocId),
+        projectId: fsString(projectId),
+        title: fsString(normalizedTaskTitle),
+        name: fsString(normalizedTaskTitle),
+        assignee: fsString(assigneeDisplayName),
+        assignees: fsStringArray(assigneeInfo.assigneeEmployeeIds),
+        lineAssigneeIds: fsStringArray(assigneeInfo.assigneeLineUserIds),
+        lineAssigneeNames: fsStringArray(assigneeInfo.assigneeNames),
+        status: fsString('in-progress'),
+        type: fsString(assigneeInfo.assigneeEmployeeIds.length > 1 ? 'team' : 'individual'),
+        value: { integerValue: '0' },
+        formatIssues: { arrayValue: {} },
+        source: fsString('line-tagged-task'),
+        lineMessageId: fsString(lineMessageId),
+        lineContextMessageIds: fsStringArray(lineContextMessageIds),
+        lineUserId: fsString(lineUserId),
+        createdBy: fsString(lineUserId),
+        createdByName: fsString(creatorName || 'สมาชิกในกลุ่ม'),
+        sourceText: fsString(parsedCandidate.rawText),
+        messageSentiment: fsString(sourceSentiment.type),
+        messageSentimentLabel: fsString(sourceSentiment.label),
+        messageSentimentEmoji: fsString(sourceSentiment.emoji),
+        messageSentimentScore: { integerValue: String(sourceSentiment.score) },
+        deadline: fsString(parsedCandidate.deadlineIso || ''),
+        deadlineText: fsString(parsedCandidate.deadlineDisplay || ''),
+        createdAt: { timestampValue: nowIso },
+        updatedAt: { timestampValue: nowIso }
+    };
+
+    let created = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+        created = await patchFirestoreDoc(`tasks/${taskDocId}`, fields, env, false);
+        if (created) {
+            break;
+        }
+
+        await sleep(120 * (attempt + 1));
+    }
+
+    return {
+        matched: true,
+        created,
+        duplicate: false,
+        followup: false,
         taskId: taskDocId,
         deadlineIso: parsedCandidate.deadlineIso,
         reason: created ? 'created' : 'write-failed'
@@ -2339,8 +2661,8 @@ async function tryRecordMeetingSummaryTaskReply(event, env, options = {}) {
     }
 
     const source = readFirestoreStringField(taskFields, 'source');
-    if (source !== 'line-meeting-summary') {
-        return { matched: false, updated: false, reason: 'not-meeting-task' };
+    if (!isSupportedLineTaskSource(source)) {
+        return { matched: false, updated: false, reason: 'not-line-task' };
     }
 
     const taskProjectId = readFirestoreStringField(taskFields, 'projectId');
@@ -2352,7 +2674,7 @@ async function tryRecordMeetingSummaryTaskReply(event, env, options = {}) {
     const createdByLineUserId = readFirestoreStringField(taskFields, 'createdBy');
     const isTaskCreator = createdByLineUserId && createdByLineUserId === lineUserId;
     if (lineAssigneeIds.length > 0 && !lineAssigneeIds.includes(lineUserId) && !isTaskCreator) {
-        return { matched: true, updated: false, reason: 'not-assignee', taskId: taskDocId };
+        return { matched: false, updated: false, reason: 'not-assignee', taskId: taskDocId };
     }
 
     const replyLineMessageId = String(event?.message?.id || '').trim();
@@ -2397,9 +2719,19 @@ async function tryRecordMeetingSummaryTaskReply(event, env, options = {}) {
         ? [...new Set([...existingReplyLineMessageIds, replyLineMessageId])].slice(-100)
         : existingReplyLineMessageIds;
 
+    const existingLineContextMessageIds = readFirestoreStringArrayField(taskFields, 'lineContextMessageIds');
+    const nextLineContextMessageIds = [
+        ...new Set([
+            ...existingLineContextMessageIds,
+            quotedMessageId,
+            replyLineMessageId
+        ].filter(Boolean))
+    ].slice(-120);
+
     const updated = await patchFirestoreDoc(`tasks/${taskDocId}`, {
         timelineEntries: fsTimelineEntriesArray(nextTimelineEntries),
         replyLineMessageIds: fsStringArray(nextReplyLineMessageIds),
+        lineContextMessageIds: fsStringArray(nextLineContextMessageIds),
         replyAnswerText: fsString(replyPreviewText || '-'),
         replyAnswerAt: { timestampValue: nowIso },
         replyAnswerBy: fsString(lineUserId),
@@ -4515,6 +4847,65 @@ async function handleUnifiedEvent(event, env) {
                 }
             } else {
                 await replyOrPush('รับข้อความสรุปประชุมแล้ว แต่บันทึกงานไม่สำเร็จ กรุณาลองใหม่อีกครั้งค่ะ');
+            }
+
+            return;
+        }
+
+        const taggedTaskResult = await tryCreateTaggedLineTask(event, env, {
+            projectId: groupId,
+            lineUserId
+        }).catch((err) => {
+            console.error('Auto tagged task failed:', err);
+            return { matched: false, created: false, reason: 'exception' };
+        });
+
+        if (
+            taggedTaskResult?.reason
+            && taggedTaskResult.reason !== 'not-tasklike'
+            && taggedTaskResult.reason !== 'no-task-signal'
+            && taggedTaskResult.reason !== 'command'
+            && taggedTaskResult.reason !== 'not-tagged'
+            && taggedTaskResult.reason !== 'no-assignee-mention'
+        ) {
+            console.log('Tagged task decision:', {
+                reason: taggedTaskResult.reason,
+                matched: Boolean(taggedTaskResult.matched),
+                created: Boolean(taggedTaskResult.created),
+                updated: Boolean(taggedTaskResult.updated),
+                duplicate: Boolean(taggedTaskResult.duplicate),
+                followup: Boolean(taggedTaskResult.followup),
+                groupId,
+                lineMessageId: String(event?.message?.id || '').trim(),
+                quotedMessageId,
+                taskId: String(taggedTaskResult?.taskId || '')
+            });
+        }
+
+        if (taggedTaskResult?.matched) {
+            const quoteToken = String(event?.message?.quoteToken || '').trim();
+            const ackText = taggedTaskResult.duplicate
+                ? (taggedTaskResult.followup
+                    ? '✅ คำสั่งต่อเนื่องนี้บันทึกไว้แล้วค่ะ'
+                    : '✅ ข้อความนี้บันทึกเป็นงานไว้แล้วค่ะ')
+                : (taggedTaskResult.followup
+                    ? (taggedTaskResult.updated
+                        ? '✅ เพิ่มคำสั่งต่อเนื่องเข้าในงานเดิมแล้วค่ะ'
+                        : 'รับข้อความต่อเนื่องแล้ว แต่บันทึกงานไม่สำเร็จ กรุณาลองใหม่อีกครั้งค่ะ')
+                    : (taggedTaskResult.created
+                        ? '✅ บันทึกข้อความเป็นงานเรียบร้อยแล้วค่ะ'
+                        : 'รับข้อความแล้ว แต่บันทึกงานไม่สำเร็จ กรุณาลองใหม่อีกครั้งค่ะ'));
+
+            const sent = await replyText(replyToken, ackText, env, {
+                groupId,
+                quoteToken
+            });
+
+            if (!sent && fallbackReplyTarget) {
+                await pushText(fallbackReplyTarget, ackText, env, {
+                    groupId,
+                    quoteToken
+                });
             }
 
             return;
