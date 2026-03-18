@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="480" viewBox="0 0 1200 480" role="img" aria-label="BETIMES SOLUTIONS">
+  <rect width="1200" height="480" fill="#ffffff"/>
+  <g font-family="Kanit, Arial, sans-serif" font-weight="800">
+    <text x="60" y="220" font-size="190" fill="#24387E">BET</text>
+    <text x="470" y="220" font-size="190" fill="#F28A1A">i</text>
+    <text x="540" y="220" font-size="190" fill="#24387E">MES</text>
+  </g>
+  <text x="62" y="360" font-family="Kanit, Arial, sans-serif" font-size="95" letter-spacing="30" fill="#24387E">SOLUTIONS</text>
+</svg>

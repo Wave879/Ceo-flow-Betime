@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ลงทะเบียนสมาชิกกลุ่ม</title>
+    <style>
+        :root {
+            --bg: #f4f6fb;
+            --card: #ffffff;
+            --text: #0f172a;
+            --muted: #64748b;
+            --accent: #f28a1a;
+            --accent-dark: #d6730f;
+            --ok-bg: #dcfce7;
+            --ok-text: #166534;
+            --err-bg: #fee2e2;
+            --err-text: #991b1b;
+            --ring: rgba(242, 138, 26, 0.25);
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+            color: var(--text);
+            background:
+                radial-gradient(circle at 15% 15%, #ffe9cf 0%, transparent 45%),
+                radial-gradient(circle at 85% 5%, #dbeafe 0%, transparent 30%),
+                var(--bg);
+            display: grid;
+            place-items: center;
+            padding: 20px;
+        }
+
+        .card {
+            width: min(520px, 100%);
+            background: var(--card);
+            border-radius: 20px;
+            border: 1px solid #e2e8f0;
+            box-shadow: 0 18px 40px rgba(15, 23, 42, 0.12);
+            overflow: hidden;
+        }
+
+        .header {
+            padding: 20px 22px;
+            background: linear-gradient(135deg, #24387e 0%, #1a2744 100%);
+            color: #fff;
+        }
+
+        .header h1 {
+            margin: 0;
+            font-size: 1.2rem;
+        }
+
+        .header p {
+            margin: 8px 0 0;
+            font-size: 0.9rem;
+            opacity: 0.9;
+        }
+
+        .content {
+            padding: 20px 22px 22px;
+        }
+
+        .status {
+            border-radius: 12px;
+            padding: 12px 14px;
+            font-size: 0.95rem;
+            line-height: 1.45;
+            margin-bottom: 14px;
+            background: #f8fafc;
+            color: var(--text);
+            border: 1px solid #e2e8f0;
+        }
+
+        .status.ok {
+            background: var(--ok-bg);
+            color: var(--ok-text);
+            border-color: #bbf7d0;
+        }
+
+        .status.error {
+            background: var(--err-bg);
+            color: var(--err-text);
+            border-color: #fecaca;
+        }
+
+        .meta {
+            display: grid;
+            gap: 6px;
+            padding: 12px;
+            border: 1px dashed #cbd5e1;
+            border-radius: 12px;
+            background: #f8fafc;
+            margin-bottom: 14px;
+            font-size: 0.9rem;
+            color: var(--muted);
+        }
+
+        .meta b {
+            color: var(--text);
+        }
+
+        .actions {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            border: none;
+            border-radius: 999px;
+            padding: 10px 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.12s ease, box-shadow 0.12s ease, opacity 0.12s ease;
+        }
+
+        .btn:focus-visible {
+            outline: none;
+            box-shadow: 0 0 0 4px var(--ring);
+        }
+
+        .btn-primary {
+            background: var(--accent);
+            color: #fff;
+        }
+
+        .btn-primary:hover {
+            background: var(--accent-dark);
+            transform: translateY(-1px);
+        }
+
+        .btn-secondary {
+            background: #e2e8f0;
+            color: #0f172a;
+        }
+
+        .small {
+            margin-top: 12px;
+            color: var(--muted);
+            font-size: 0.82rem;
+        }
+
+        @media (max-width: 480px) {
+            .header,
+            .content {
+                padding: 16px;
+            }
+
+            .actions {
+                display: grid;
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+    <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+</head>
+<body>
+    <main class="card">
+        <section class="header">
+            <h1>ลงทะเบียนสมาชิกกลุ่ม CEO FLOW</h1>
+            <p>ยืนยันตัวตนครั้งเดียว ระบบจะเชื่อมชื่อจริงเข้าทีมให้อัตโนมัติ</p>
+        </section>
+
+        <section class="content">
+            <div id="status" class="status">กำลังเตรียมการ...</div>
+            <div id="meta" class="meta" style="display:none"></div>
+            <div class="actions">
+                <button id="retryBtn" class="btn btn-primary" type="button" style="display:none">ลองใหม่</button>
+                <button id="closeBtn" class="btn btn-secondary" type="button" style="display:none">ปิดหน้าต่าง</button>
+            </div>
+            <p class="small">ถ้าเปิดจาก LINE แล้วปิดไม่ได้ สามารถกดย้อนกลับได้เลย</p>
+        </section>
+    </main>
+
+    <script>
+        const statusEl = document.getElementById('status');
+        const metaEl = document.getElementById('meta');
+        const retryBtn = document.getElementById('retryBtn');
+        const closeBtn = document.getElementById('closeBtn');
+
+        function setStatus(message, type = '') {
+            statusEl.textContent = message;
+            statusEl.className = `status ${type}`.trim();
+        }
+
+        function showMeta(rows) {
+            const safeRows = Array.isArray(rows) ? rows : [];
+            if (safeRows.length === 0) {
+                metaEl.style.display = 'none';
+                metaEl.innerHTML = '';
+                return;
+            }
+
+            metaEl.innerHTML = safeRows
+                .map((row) => `<div><b>${row.label}</b> ${row.value}</div>`)
+                .join('');
+            metaEl.style.display = 'grid';
+        }
+
+        function canCloseLineWindow() {
+            return typeof liff !== 'undefined' && typeof liff.closeWindow === 'function';
+        }
+
+        function closeWindowSafely() {
+            if (canCloseLineWindow()) {
+                liff.closeWindow();
+                return;
+            }
+            window.close();
+        }
+
+        async function start() {
+            retryBtn.style.display = 'none';
+            closeBtn.style.display = 'none';
+            showMeta([]);
+
+            const params = new URLSearchParams(window.location.search);
+            const groupId = String(params.get('groupId') || '').trim();
+            const liffId = String(params.get('liffId') || '').trim();
+
+            if (!/^C[0-9a-f]{32}$/i.test(groupId)) {
+                setStatus('ไม่พบ groupId ที่ถูกต้องในลิงก์', 'error');
+                retryBtn.style.display = 'inline-flex';
+                return;
+            }
+
+            if (!liffId) {
+                setStatus('ไม่พบ liffId ในลิงก์ กรุณาขอลิงก์ใหม่จากแอดมิน', 'error');
+                retryBtn.style.display = 'inline-flex';
+                return;
+            }
+
+            try {
+                setStatus('กำลังเชื่อมต่อ LINE Login...');
+                await liff.init({ liffId });
+
+                if (!liff.isLoggedIn()) {
+                    liff.login({ redirectUri: window.location.href });
+                    return;
+                }
+
+                setStatus('กำลังอ่านข้อมูลผู้ใช้...');
+                const profile = await liff.getProfile();
+                const idToken = String(liff.getIDToken() || '').trim();
+                if (!idToken) {
+                    throw new Error('ไม่พบ ID token จาก LIFF');
+                }
+
+                setStatus('กำลังบันทึกเข้าระบบ CEO FLOW...');
+                const res = await fetch('/api/liff-register', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        groupId,
+                        idToken,
+                        lineUserId: profile.userId || '',
+                        displayName: profile.displayName || '',
+                        pictureUrl: profile.pictureUrl || '',
+                        source: 'liff'
+                    })
+                });
+
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok || !data?.success) {
+                    throw new Error(data?.detail || data?.error || 'ลงทะเบียนไม่สำเร็จ');
+                }
+
+                const displayName = String(data.displayName || profile.displayName || '').trim() || 'สมาชิก';
+                setStatus(`ลงทะเบียนสำเร็จค่ะ ${displayName} สามารถกลับไปใช้งานในกลุ่มได้เลย`, 'ok');
+                showMeta([
+                    { label: 'กลุ่ม:', value: groupId },
+                    { label: 'สมาชิกใหม่ในกลุ่ม:', value: data.isNewGroupMember ? 'ใช่' : 'ไม่ใช่' },
+                    { label: 'ปรับสมาชิกสำรอง:', value: data.placeholderReduced ? 'ลดแล้ว' : 'ไม่มีการเปลี่ยนแปลง' },
+                    { label: 'โหมดยืนยันตัวตน:', value: data.verifiedByIdToken ? 'idToken verified' : 'fallback profile' },
+                    ...(data.verificationWarning ? [{ label: 'หมายเหตุ:', value: data.verificationWarning }] : [])
+                ]);
+                closeBtn.style.display = 'inline-flex';
+            } catch (err) {
+                setStatus(`ลงทะเบียนไม่สำเร็จ: ${err.message || err}`, 'error');
+                retryBtn.style.display = 'inline-flex';
+                closeBtn.style.display = 'inline-flex';
+            }
+        }
+
+        retryBtn.addEventListener('click', () => {
+            start();
+        });
+
+        closeBtn.addEventListener('click', () => {
+            closeWindowSafely();
+        });
+
+        start();
+    </script>
+</body>
+</html>
