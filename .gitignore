@@ -1,11 +1,18 @@
 # Dependencies
 node_modules/
+functions/node_modules/
 ceoflow-backend/functions/node_modules/
 
 # Build and deploy artifacts
 dist/
 .pages-deploy/
 .wrangler/
+
+# Firebase artifacts
+.firebase/
+firebase-debug.log*
+ceoflow-backend/.firebase/
+ceoflow-backend/firebase-debug.log*
 
 # Local environment and secrets
 .dev.vars
@@ -21,3 +28,9 @@ pnpm-debug.log*
 # OS files
 .DS_Store
 Thumbs.db
+
+# IDE and editor files
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
