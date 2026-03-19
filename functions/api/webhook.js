@@ -659,6 +659,9 @@ const TAGGED_TASK_KEYWORDS = [
     'นัดหมาย',
     'nextstep',
     'next step',
+    'follow up',
+    'follow-up',
+    'followup',
     'แจ้ง',
     'ภายใน',
     'ตามด้วย',
@@ -670,10 +673,45 @@ const TAGGED_TASK_KEYWORDS = [
     'ประชุม',
     'ติดตาม',
     'ช่วย',
+    'รบกวน',
+    'ฝาก',
+    'ดำเนินการ',
+    'ตรวจสอบ',
+    'อัปเดต',
+    'update',
+    'รีวิว',
+    'รายงาน',
     'วิเคราะห์',
     'จัดการ',
     'ขอ'
 ];
+
+function buildTaggedLineTaskFallbackTitle(rawText = '') {
+    const compactText = normalizeIncomingText(rawText).replace(/\s+/g, ' ').trim();
+    if (!compactText) {
+        return '';
+    }
+
+    const ccBoundaryIndex = findCcBoundaryIndex(compactText);
+    const taskSegment = ccBoundaryIndex >= 0
+        ? compactText.slice(0, ccBoundaryIndex).trim()
+        : compactText;
+
+    let title = stripLeadingBotMentions(taskSegment)
+        .replace(/^\/?(?:ai|ask|ถาม|ไอน่า)\s*/iu, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    if (!title) {
+        return '';
+    }
+
+    if (title.length > 180) {
+        title = `${title.slice(0, 177)}...`;
+    }
+
+    return title;
+}
 
 function parseTaggedLineTaskCandidate(rawText = '') {
     const text = normalizeIncomingText(rawText);
@@ -1310,7 +1348,26 @@ async function tryCreateTaggedLineTask(event, env, options = {}) {
     }
 
     const messageText = normalizeIncomingText(event?.message?.text || '');
-    const parsedCandidate = parseTaggedLineTaskCandidate(messageText);
+    const assigneeMentionLineUserIds = extractMeetingTaskAssigneeLineUserIds(event, env);
+    let parsedCandidate = parseTaggedLineTaskCandidate(messageText);
+
+    if (!parsedCandidate.matched && parsedCandidate.reason === 'no-task-signal' && assigneeMentionLineUserIds.length > 0) {
+        const fallbackTitle = buildTaggedLineTaskFallbackTitle(messageText);
+        if (fallbackTitle) {
+            parsedCandidate = {
+                matched: true,
+                title: fallbackTitle,
+                deadlineIso: '',
+                deadlineDisplay: '',
+                rawText: normalizeIncomingText(messageText).replace(/\s+/g, ' ').trim(),
+                hasDeadlineSignal: false,
+                hasQuestion: false,
+                keywordHits: 0,
+                fallbackSignal: 'assignee-mention'
+            };
+        }
+    }
+
     if (!parsedCandidate.matched) {
         return { matched: false, created: false, reason: parsedCandidate.reason || 'not-tasklike' };
     }
@@ -1416,8 +1473,8 @@ async function tryCreateTaggedLineTask(event, env, options = {}) {
         }
     }
 
-    const assigneeMentionLineUserIds = extractMeetingTaskAssigneeLineUserIds(event, env);
-    if (assigneeMentionLineUserIds.length === 0) {
+    const hasStrongTaskSignal = Boolean(parsedCandidate.hasDeadlineSignal) || Number(parsedCandidate.keywordHits || 0) > 0;
+    if (assigneeMentionLineUserIds.length === 0 && !hasStrongTaskSignal) {
         return { matched: false, created: false, reason: 'no-assignee-mention' };
     }
 

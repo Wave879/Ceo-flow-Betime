@@ -92,24 +92,26 @@ export function PieChart({ data = null, tasks = [], employees = [], centerLabel 
         const midPct = cumulative + pct / 2;
         const angle = (midPct * 2 * Math.PI) - Math.PI / 2;
         return {
-            x: cx + (r + 28) * Math.cos(angle),
-            y: cy + (r + 28) * Math.sin(angle),
+            x: cx + (r + 22) * Math.cos(angle),
+            y: cy + (r + 22) * Math.sin(angle),
         };
     };
 
     const cx = 150, cy = 150, r = 100;
+    const hasSingleSlice = chartState.slices.length <= 1;
 
     return (
-        <div className="flex flex-col items-center">
-            <svg width="300" height="300" viewBox="0 0 300 300" style={{ overflow: 'visible' }}>
+        <div className="w-full h-full">
+            <svg className="w-full h-full" viewBox="0 0 300 300" preserveAspectRatio="xMidYMid meet">
                 {chartState.slices.map((slice) => {
                     const labelPos = getLabelPos(slice.cumulative, slice.pct, cx, cy, r);
                     const midAngle = ((slice.cumulative + slice.pct / 2) * 2 * Math.PI) - Math.PI / 2;
                     const labelAnchor = labelPos.x > cx ? 'start' : 'end';
+                    const shouldRenderOuterLabel = !hasSingleSlice && slice.pct >= 0.08 && slice.pct < 0.9;
                     // line from slice edge to label
                     const lineStart = {
-                        x: cx + (r + 6) * Math.cos(midAngle),
-                        y: cy + (r + 6) * Math.sin(midAngle),
+                        x: cx + (r + 4) * Math.cos(midAngle),
+                        y: cy + (r + 4) * Math.sin(midAngle),
                     };
                     return (
                         <g key={slice.id} className="group cursor-pointer">
@@ -121,7 +123,7 @@ export function PieChart({ data = null, tasks = [], employees = [], centerLabel 
                                 className="transition-all duration-200 group-hover:opacity-80"
                                 style={{ filter: 'drop-shadow(0 2px 4px rgba(0,0,0,0.12))' }}
                             />
-                            {slice.pct > 0.06 && (
+                            {shouldRenderOuterLabel && (
                                 <>
                                     <line
                                         x1={lineStart.x} y1={lineStart.y}
