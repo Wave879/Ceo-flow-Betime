@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { collection, doc, addDoc, updateDoc, deleteDoc, onSnapshot } from 'firebase/firestore';
-import { db } from '../firebase';
+import { db, hasFirebaseConfig } from '../firebase';
 import { initialEmployees, initialPositions, initialTasks, EMPLOYEE_COLORS } from '../data/initialData';
 
 // ── localStorage helpers ─────────────────────────────────
@@ -35,7 +35,7 @@ export function useFirestore() {
     const [projects, setProjects] = useState(() => []);
     const [loading, setLoading] = useState(true);
     // ✅ Force Firebase only (disable local mode completely)
-    const [useLocal] = useState(false);
+    const [useLocal] = useState(() => !hasFirebaseConfig);
     const ready = useRef(false);
 
     // Persist to localStorage whenever state changes (after first load)
@@ -66,12 +66,17 @@ export function useFirestore() {
         } catch { }
 
         const tryFirebase = async () => {
+            console.log('🔥 Attempting Firebase connection...');
             try {
                 const unsub1 = onSnapshot(collection(db, 'tasks'), snap => {
                     const data = snap.docs.map(d => normalizeTask({ id: d.id, ...d.data() }));
                     setTasks(data);
                     saveLS(LS_KEYS.tasks, data);
-                }, (err) => fallbackToLocal(err));
+                    console.log(`✅ Loaded ${data.length} tasks from Firebase`);
+                }, (err) => {
+                    console.error('❌ Tasks listener error:', err.message);
+                    fallbackToLocal(err);
+                });
 
                 const unsub2 = onSnapshot(collection(db, 'employees'), snap => {
                     const data = (snap.docs || []).map(d => {
@@ -94,38 +99,61 @@ export function useFirestore() {
                     });
                     setEmployees(Array.isArray(data) ? data : []);
                     saveLS(LS_KEYS.employees, data);
-                }, (err) => fallbackToLocal(err));
+                    console.log(`✅ Loaded ${data.length} employees from Firebase`);
+                }, (err) => {
+                    console.error('❌ Employees listener error:', err.message);
+                    fallbackToLocal(err);
+                });
 
                 const unsub3 = onSnapshot(collection(db, 'positions'), snap => {
                     const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
                     setPositions(data);
                     saveLS(LS_KEYS.positions, data);
-                }, (err) => fallbackToLocal(err));
+                    console.log(`✅ Loaded ${data.length} positions from Firebase`);
+                }, (err) => {
+                    console.error('❌ Positions listener error:', err.message);
+                    fallbackToLocal(err);
+                });
 
                 // ✅ Subscribe projects collection
                 const unsub4 = onSnapshot(collection(db, 'projects'), snap => {
                     const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
                     setProjects(Array.isArray(data) ? data : []);
-                }, (err) => fallbackToLocal(err));
+                    console.log(`✅ Loaded ${data.length} projects from Firebase`);
+                }, (err) => {
+                    console.error('❌ Projects listener error:', err.message);
+                    fallbackToLocal(err);
+                });
 
                 unsubs = [unsub1, unsub2, unsub3, unsub4];
-                setTimeout(() => { ready.current = true; setLoading(false); }, 500);
-            } catch {
-                fallbackToLocal();
+                setTimeout(() => { 
+                    ready.current = true; 
+                    setLoading(false);
+                    console.log('✅ Firebase connection ready');
+                }, 500);
+            } catch (err) {
+                console.error('❌ Firebase initialization error:', err.message);
+                fallbackToLocal(err);
             }
         };
 
         const fallbackToLocal = (err) => {
-            console.error('🔥 Firebase ERROR:', err);
+            console.warn('⚠️ Falling back to local storage mode:', err?.message);
             ready.current = true;
             setLoading(false);
         };
 
         // ✅ Force use Firebase 100% (disable local fallback)
-        tryFirebase();
+        if (useLocal || !db) {
+            console.warn('⚠️ Firebase not available - using LOCAL mode only');
+            ready.current = true;
+            setLoading(false);
+        } else {
+            tryFirebase();
+        }
 
         return () => unsubs.forEach(u => u && u());
-    }, []);
+    }, [useLocal]);
 
     // ── Firebase or localStorage write helpers ───────────────
     const fbOr = async (fbFn, localFn) => {
@@ -136,15 +164,42 @@ export function useFirestore() {
     // ── Tasks ────────────────────────────────────────────────
     const addTask = useCallback(async (task) => {
         const normalizedTask = normalizeTask(task);
-        const newTask = { ...normalizedTask, id: normalizedTask.id || `t${Date.now()}` };
-        await fbOr(
-            async () => {
+        const tempId = `t${Date.now()}`;
+        const newTask = { ...normalizedTask, id: normalizedTask.id || tempId };
+        
+        // Add to local state first (UI feedback)
+        setTasks(p => { 
+            const n = [...p, newTask]; 
+            saveLS(LS_KEYS.tasks, n); 
+            return n; 
+        });
+
+        // Then sync to Firebase
+        let firebaseId = newTask.id;
+        if (db) {
+            try {
                 const ref = await addDoc(collection(db, 'tasks'), normalizedTask);
-                newTask.id = ref.id;
-                setTasks(p => { const n = [...p, newTask]; saveLS(LS_KEYS.tasks, n); return n; });
-            },
-            () => setTasks(p => { const n = [...p, newTask]; saveLS(LS_KEYS.tasks, n); return n; })
-        );
+                firebaseId = ref.id;
+                console.log(`✅ Task added to Firebase:`, firebaseId);
+                
+                // Update state with actual Firebase ID if it was temp
+                if (newTask.id === tempId) {
+                    setTasks(p => { 
+                        const n = p.map(t => t.id === tempId ? { ...t, id: firebaseId } : t);
+                        saveLS(LS_KEYS.tasks, n);
+                        return n;
+                    });
+                }
+            } catch (err) {
+                console.error(`❌ Firebase task add failed:`, {
+                    errorCode: err.code,
+                    errorMessage: err.message
+                });
+                // Keep local entry even if Firebase fails
+            }
+        } else {
+            console.warn('⚠️ Firebase DB not initialized - task may not persist across sessions');
+        }
 
         // 🔔 Trigger LINE Webhook (Cloudflare Pages Function) in the background
         const assigneeNames = employees
@@ -163,26 +218,80 @@ export function useFirestore() {
             })
         }).catch(err => console.error("Line Notify Failed:", err));
 
+        newTask.id = firebaseId;
         return newTask;
-    }, [useLocal, employees]);
+    }, [employees]);
 
     const updateTask = useCallback(async (id, data) => {
+        if (!id || !data) {
+            console.warn('❌ updateTask: missing id or data', { id, data });
+            return;
+        }
+        
+        // Always try Firebase first - most important
+        let firebaseSuccess = false;
+        if (db) {
+            try {
+                const taskRef = doc(db, 'tasks', id);
+                const updatePayload = {
+                    ...data,
+                    _lastUpdated: new Date().toISOString(),
+                    _updatedFrom: 'web-modal'
+                };
+                await updateDoc(taskRef, updatePayload);
+                firebaseSuccess = true;
+                console.log(`✅ Task updated in Firebase: ${id}`, updatePayload);
+            } catch (err) {
+                console.error(`❌ Firebase task update failed for id=${id}:`, {
+                    errorCode: err.code,
+                    errorMessage: err.message,
+                    data
+                });
+                // Don't fallback to local - keep trying Firebase
+            }
+        } else {
+            console.warn('⚠️ Firebase DB not initialized - task update may not persist');
+        }
+        
+        // Update local state (UI feedback)
         setTasks(p => {
             const n = p.map(t => t.id === id ? { ...t, ...data } : t);
             saveLS(LS_KEYS.tasks, n);
             return n;
         });
-        if (!useLocal) {
-            try { await updateDoc(doc(db, 'tasks', id), data); } catch { }
-        }
-    }, [useLocal]);
+    }, []);
 
     const deleteTask = useCallback(async (id) => {
-        setTasks(p => { const n = p.filter(t => t.id !== id); saveLS(LS_KEYS.tasks, n); return n; });
-        if (!useLocal) {
-            try { await deleteDoc(doc(db, 'tasks', id)); } catch { }
+        if (!id) {
+            console.warn('❌ deleteTask: missing id');
+            return;
         }
-    }, [useLocal]);
+
+        // Always try Firebase first
+        let firebaseSuccess = false;
+        if (db) {
+            try {
+                await deleteDoc(doc(db, 'tasks', id));
+                firebaseSuccess = true;
+                console.log(`✅ Task deleted from Firebase: ${id}`);
+            } catch (err) {
+                console.error(`❌ Firebase task delete failed for id=${id}:`, {
+                    errorCode: err.code,
+                    errorMessage: err.message
+                });
+                // Don't return - still update local
+            }
+        } else {
+            console.warn('⚠️ Firebase DB not initialized - task delete may not persist');
+        }
+        
+        // Update local state (UI feedback)
+        setTasks(p => { 
+            const n = p.filter(t => t.id !== id); 
+            saveLS(LS_KEYS.tasks, n); 
+            return n; 
+        });
+    }, []);
 
     // ── Employees ─────────────────────────────────────────────
     const addEmployee = useCallback(async (emp) => {

@@ -1,9 +1,9 @@
 import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react';
 import {
     FolderKanban, Users, MessageCircle, AlertCircle, CheckCircle,
-    Clock, Send, Plus, Search, Trash2, RefreshCcw, Link2, X, Calendar, ChevronRight, Archive
+    Clock, Send, Plus, Search, Trash2, RefreshCcw, Link2, X, Calendar, ChevronRight, Archive, Pencil, Check
 } from 'lucide-react';
-import { collection, query, where, orderBy, limit, onSnapshot } from 'firebase/firestore';
+import { collection, query, where, orderBy, limit, onSnapshot, doc, updateDoc } from 'firebase/firestore';
 import { db } from '../firebase';
 import TaskDetailModal from '../components/TaskDetailModal';
 import { Avatar, StatusBadge, formatDate } from '../components/UI';
@@ -28,6 +28,8 @@ const GROUP_TYPE_VALUES = new Set(['unset', 'betimes', 'outsource', 'external'])
 const ATTACHMENT_MESSAGE_TYPES = new Set(['image', 'video', 'audio', 'file']);
 const TASK_POPUP_MAX = 6;
 const REPLY_UNREAD_OVERDUE_MS = 7 * 24 * 60 * 60 * 1000;
+const LINE_POPUP_ANIMATION_MS = 220;
+const URL_IN_TEXT_REGEX = /(?:https?:\/\/|www\.)[^\s<>"']+/giu;
 
 function readLineGroupsFromBrowserCache() {
     if (typeof window === 'undefined') {
@@ -66,6 +68,15 @@ function normalizeGroupType(value) {
         return normalized;
     }
     return 'unset';
+}
+
+function normalizeTaskStatus(value = '') {
+    const normalized = String(value || '').trim().toLowerCase();
+    if (normalized === 'completed' || normalized === 'abandoned' || normalized === 'in-progress') {
+        return normalized;
+    }
+
+    return 'in-progress';
 }
 
 function readGroupTypesFromBrowserCache() {
@@ -164,6 +175,268 @@ function normalizeChatText(value = '') {
         .trim();
 }
 
+function normalizeExternalUrl(rawUrl = '') {
+    let normalized = String(rawUrl || '').trim();
+    if (!normalized) {
+        return '';
+    }
+
+    normalized = normalized.replace(/[),.;!?]+$/u, '');
+    if (/^www\./iu.test(normalized)) {
+        normalized = `https://${normalized}`;
+    }
+
+    try {
+        const parsed = new URL(normalized);
+        const protocol = String(parsed.protocol || '').toLowerCase();
+        if (protocol !== 'http:' && protocol !== 'https:') {
+            return '';
+        }
+        return parsed.toString();
+    } catch {
+        return '';
+    }
+}
+
+function renderMessageTextWithLinks(text = '') {
+    const source = String(text || '');
+    if (!source) {
+        return '';
+    }
+
+    URL_IN_TEXT_REGEX.lastIndex = 0;
+    const chunks = [];
+    let cursor = 0;
+    let match = URL_IN_TEXT_REGEX.exec(source);
+
+    while (match) {
+        const matchText = String(match[0] || '');
+        const start = Number(match.index);
+        if (start > cursor) {
+            chunks.push({ kind: 'text', value: source.slice(cursor, start) });
+        }
+
+        const trimmedToken = matchText.replace(/[),.;!?]+$/u, '');
+        const trailingText = matchText.slice(trimmedToken.length);
+        const href = normalizeExternalUrl(trimmedToken);
+
+        if (href) {
+            chunks.push({ kind: 'link', value: trimmedToken, href });
+            if (trailingText) {
+                chunks.push({ kind: 'text', value: trailingText });
+            }
+        } else {
+            chunks.push({ kind: 'text', value: matchText });
+        }
+
+        cursor = start + matchText.length;
+        match = URL_IN_TEXT_REGEX.exec(source);
+    }
+
+    if (cursor < source.length) {
+        chunks.push({ kind: 'text', value: source.slice(cursor) });
+    }
+
+    return chunks.map((chunk, index) => {
+        if (chunk.kind !== 'link') {
+            return <React.Fragment key={`text-${index}`}>{chunk.value}</React.Fragment>;
+        }
+
+        return (
+            <a
+                key={`link-${index}`}
+                href={chunk.href}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline decoration-1 underline-offset-2 text-sky-700 dark:text-sky-300 hover:text-sky-800 dark:hover:text-sky-200 break-all"
+            >
+                {chunk.value}
+            </a>
+        );
+    });
+}
+
+function buildMessageDownloadUrl(viewUrl = '', fileName = '') {
+    const rawViewUrl = String(viewUrl || '').trim();
+    if (!rawViewUrl) {
+        return '';
+    }
+
+    try {
+        const origin = typeof window !== 'undefined' ? window.location.origin : 'https://ceoflow.pages.dev';
+        const parsed = new URL(rawViewUrl, origin);
+        if (!parsed.pathname.endsWith('/api/line-message-content')) {
+            return rawViewUrl;
+        }
+
+        parsed.searchParams.set('download', '1');
+        const safeName = String(fileName || '').trim();
+        if (safeName) {
+            parsed.searchParams.set('fileName', safeName);
+        }
+
+        if (typeof window !== 'undefined' && parsed.origin === window.location.origin) {
+            return `${parsed.pathname}${parsed.search}`;
+        }
+
+        return parsed.toString();
+    } catch {
+        return rawViewUrl;
+    }
+}
+
+function buildLocationMapUrl(message = {}) {
+    const latitude = Number(message?.latitude);
+    const longitude = Number(message?.longitude);
+    if (Number.isFinite(latitude) && Number.isFinite(longitude)) {
+        return `https://www.google.com/maps?q=${encodeURIComponent(`${latitude},${longitude}`)}`;
+    }
+
+    const title = String(message?.locationTitle || '').trim();
+    const address = String(message?.locationAddress || '').trim();
+    const queryText = normalizeChatText([title, address].filter(Boolean).join(' '));
+    if (!queryText) {
+        return '';
+    }
+
+    return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(queryText)}`;
+}
+
+function tryParseJsonObject(rawValue) {
+    if (!rawValue) {
+        return null;
+    }
+
+    if (typeof rawValue === 'object') {
+        return rawValue;
+    }
+
+    const normalized = String(rawValue || '').trim();
+    if (!normalized || (!normalized.startsWith('{') && !normalized.startsWith('['))) {
+        return null;
+    }
+
+    try {
+        const parsed = JSON.parse(normalized);
+        return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch {
+        return null;
+    }
+}
+
+function collectFlexTextNodes(node, output = [], depth = 0) {
+    if (!node || depth > 7 || output.length >= 8) {
+        return output;
+    }
+
+    if (Array.isArray(node)) {
+        for (const item of node) {
+            collectFlexTextNodes(item, output, depth + 1);
+            if (output.length >= 8) {
+                break;
+            }
+        }
+        return output;
+    }
+
+    if (typeof node !== 'object') {
+        return output;
+    }
+
+    if (String(node.type || '').toLowerCase() === 'text') {
+        const textValue = normalizeChatText(node.text || '');
+        if (textValue) {
+            output.push(textValue);
+        }
+    }
+
+    for (const value of Object.values(node)) {
+        if (value && typeof value === 'object') {
+            collectFlexTextNodes(value, output, depth + 1);
+            if (output.length >= 8) {
+                break;
+            }
+        }
+    }
+
+    return output;
+}
+
+function findFlexActionUrl(node, depth = 0) {
+    if (!node || depth > 7) {
+        return '';
+    }
+
+    if (Array.isArray(node)) {
+        for (const item of node) {
+            const found = findFlexActionUrl(item, depth + 1);
+            if (found) {
+                return found;
+            }
+        }
+        return '';
+    }
+
+    if (typeof node !== 'object') {
+        return '';
+    }
+
+    const direct = normalizeExternalUrl(node.uri || node.url || '');
+    if (direct) {
+        return direct;
+    }
+
+    for (const value of Object.values(node)) {
+        if (value && typeof value === 'object') {
+            const found = findFlexActionUrl(value, depth + 1);
+            if (found) {
+                return found;
+            }
+        }
+    }
+
+    return '';
+}
+
+function resolveFlexPreview(message = {}) {
+    const candidates = [
+        message?.flexContents,
+        message?.contents,
+        message?.text,
+        message?.previewText
+    ];
+
+    let payload = null;
+    let altText = normalizeChatText(message?.flexAltText || message?.altText || '');
+
+    for (const candidate of candidates) {
+        const parsed = tryParseJsonObject(candidate);
+        if (!parsed) {
+            continue;
+        }
+
+        if (String(parsed.type || '').toLowerCase() === 'flex' && parsed.contents) {
+            payload = parsed.contents;
+            altText = altText || normalizeChatText(parsed.altText || '');
+            break;
+        }
+
+        payload = parsed;
+        break;
+    }
+
+    const textNodes = collectFlexTextNodes(payload, []);
+    const previewTitle = textNodes[0] || altText || normalizeChatText(message?.previewText || message?.text || '');
+    const previewSubtitle = textNodes.slice(1, 3).join(' | ');
+    const actionUrl = findFlexActionUrl(payload);
+
+    return {
+        title: previewTitle,
+        subtitle: previewSubtitle,
+        actionUrl
+    };
+}
+
 function toMessageDate(value) {
     if (!value) {
         return null;
@@ -196,6 +469,18 @@ function formatMessageDateTime(value) {
     }).format(date);
 }
 
+function formatMessageClock(value) {
+    const date = toMessageDate(value);
+    if (!date) {
+        return '';
+    }
+
+    return new Intl.DateTimeFormat('th-TH', {
+        hour: '2-digit',
+        minute: '2-digit'
+    }).format(date);
+}
+
 function getMessagePreviewFallback(type, raw) {
     switch (type) {
         case 'image':
@@ -208,6 +493,8 @@ function getMessagePreviewFallback(type, raw) {
             const fileName = String(raw?.fileName || '').trim();
             return fileName ? `[ไฟล์] ${fileName}` : '[ไฟล์แนบ]';
         }
+        case 'flex':
+            return '[Flex Message]';
         case 'sticker': {
             const stickerId = String(raw?.stickerId || '').trim();
             return stickerId ? `[สติกเกอร์ #${stickerId}]` : '[สติกเกอร์]';
@@ -237,6 +524,89 @@ function resolveMessageSenderName(message = {}, lineUserNameMap = new Map()) {
     }
 
     return lineUserNameMap.get(senderId) || `LINE-${senderId.slice(-6)}`;
+}
+
+function normalizeMentionLookupToken(value = '') {
+    return String(value || '')
+        .replace(/^@+/u, '')
+        .replace(/[_-]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+}
+
+function buildMentionAliases(value = '') {
+    const normalized = normalizeMentionLookupToken(value);
+    if (!normalized) {
+        return [];
+    }
+
+    const compactSpace = normalized.replace(/\s+/g, '');
+    const compactSymbol = normalized.replace(/[^a-z0-9\u0E00-\u0E7F]/giu, '');
+    return [...new Set([normalized, compactSpace, compactSymbol].filter(Boolean))];
+}
+
+function buildMentionCandidatesFromOutgoingText(text = '', groupUserNameByLineId = {}) {
+    const sourceText = String(text || '');
+    if (!sourceText) {
+        return [];
+    }
+
+    const displayNameIndex = new Map();
+    for (const [lineUserIdRaw, displayNameRaw] of Object.entries(groupUserNameByLineId || {})) {
+        const lineUserId = String(lineUserIdRaw || '').trim();
+        if (!/^U[0-9a-f]{32}$/i.test(lineUserId)) {
+            continue;
+        }
+
+        for (const alias of buildMentionAliases(displayNameRaw)) {
+            if (!displayNameIndex.has(alias)) {
+                displayNameIndex.set(alias, lineUserId);
+            }
+        }
+    }
+
+    if (displayNameIndex.size === 0) {
+        return [];
+    }
+
+    const mentions = [];
+    const seen = new Set();
+    const mentionRegex = /@[^\s]+/gu;
+    let match = mentionRegex.exec(sourceText);
+    while (match) {
+        const token = String(match[0] || '').trim();
+        const aliases = buildMentionAliases(token);
+        const isAllMention = aliases.includes('all') || aliases.includes('everyone') || aliases.includes('ทุกคน');
+        if (!isAllMention) {
+            const lineUserId = aliases
+                .map((alias) => displayNameIndex.get(alias) || '')
+                .find(Boolean);
+
+            if (lineUserId) {
+                const mentionIndex = Number(match.index);
+                const mentionLength = token.length;
+                const dedupeKey = `${lineUserId}:${Number.isFinite(mentionIndex) ? mentionIndex : ''}`;
+
+                if (!seen.has(dedupeKey)) {
+                    seen.add(dedupeKey);
+                    mentions.push({
+                        userId: lineUserId,
+                        index: Number.isFinite(mentionIndex) && mentionIndex >= 0 ? mentionIndex : undefined,
+                        length: mentionLength > 0 ? mentionLength : undefined
+                    });
+                }
+            }
+        }
+
+        if (mentions.length >= 80) {
+            break;
+        }
+
+        match = mentionRegex.exec(sourceText);
+    }
+
+    return mentions;
 }
 
 function buildStickerImageUrl(stickerId = '') {
@@ -503,37 +873,76 @@ function GroupAvatar({ name, pictureUrl, color, sizeClass = 'w-10 h-10', textCla
     );
 }
 
-export default function ProjectsPage({ tasks, employees, projects = [], onUpdateTask }) {
+export default function ProjectsPage({ tasks, employees, projects = [], onUpdateTask, onDeleteTask }) {
     const [selectedGroup, setSelectedGroup] = useState(null);
     const [searchTerm, setSearchTerm] = useState('');
+    const [taskStatusFilter, setTaskStatusFilter] = useState('all');
     const [syncAllLoading, setSyncAllLoading] = useState(false);
     const [clearAllLoading, setClearAllLoading] = useState(false);
     const [lineGroups, setLineGroups] = useState(() => readLineGroupsFromBrowserCache());
     const [groupTypeMap, setGroupTypeMap] = useState(() => readGroupTypesFromBrowserCache());
     const [groupTypeSavingMap, setGroupTypeSavingMap] = useState({});
     const [deletingGroupId, setDeletingGroupId] = useState('');
+    const [deletingTaskId, setDeletingTaskId] = useState('');
     const [syncingGroupId, setSyncingGroupId] = useState('');
     const [recountingGroupId, setRecountingGroupId] = useState('');
     const [archivingGroupId, setArchivingGroupId] = useState('');
+    const [renamingGroupId, setRenamingGroupId] = useState('');
+    const [renameValue, setRenameValue] = useState('');
     const [groupMessages, setGroupMessages] = useState([]);
     const [messagesLoading, setMessagesLoading] = useState(false);
     const [outgoingMessage, setOutgoingMessage] = useState('');
     const [replyTarget, setReplyTarget] = useState(null);
     const [sendingMessage, setSendingMessage] = useState(false);
+    const [isLineSendPopupOpen, setIsLineSendPopupOpen] = useState(false);
+    const [isLineSendPopupVisible, setIsLineSendPopupVisible] = useState(false);
     const [taskPopups, setTaskPopups] = useState([]);
     const [selectedTask, setSelectedTask] = useState(null);
     const [groupUserNameByLineId, setGroupUserNameByLineId] = useState({});
     const [pendingReplyJump, setPendingReplyJump] = useState(null);
     const [highlightedLineMessageId, setHighlightedLineMessageId] = useState('');
-    const [conversationAiSummary, setConversationAiSummary] = useState('');
-    const [conversationAiSummaryError, setConversationAiSummaryError] = useState('');
-    const [conversationAiSummaryLoading, setConversationAiSummaryLoading] = useState(false);
-    const [conversationAiSummaryMessageCount, setConversationAiSummaryMessageCount] = useState(0);
-    const chatScrollRef = useRef(null);
-    const shouldStickToBottomRef = useRef(true);
-    const previousChatGroupIdRef = useRef('');
+    const [optimisticCapturedTasks, setOptimisticCapturedTasks] = useState([]);
+    const lineSendModalInputRef = useRef(null);
+    const lineSendModalChatScrollRef = useRef(null);
     const seenTaskIdsRef = useRef(new Set());
     const initializedTaskIdsRef = useRef(false);
+    const linePopupCloseTimerRef = useRef(null);
+
+    const openLineSendPopup = useCallback(() => {
+        if (linePopupCloseTimerRef.current) {
+            clearTimeout(linePopupCloseTimerRef.current);
+            linePopupCloseTimerRef.current = null;
+        }
+
+        setIsLineSendPopupVisible(false);
+        setIsLineSendPopupOpen(true);
+
+        requestAnimationFrame(() => {
+            setIsLineSendPopupVisible(true);
+        });
+    }, []);
+
+    const closeLineSendPopup = useCallback(() => {
+        setIsLineSendPopupVisible(false);
+
+        if (linePopupCloseTimerRef.current) {
+            clearTimeout(linePopupCloseTimerRef.current);
+            linePopupCloseTimerRef.current = null;
+        }
+
+        linePopupCloseTimerRef.current = setTimeout(() => {
+            setIsLineSendPopupOpen(false);
+            linePopupCloseTimerRef.current = null;
+        }, LINE_POPUP_ANIMATION_MS);
+    }, []);
+
+    useEffect(() => {
+        return () => {
+            if (linePopupCloseTimerRef.current) {
+                clearTimeout(linePopupCloseTimerRef.current);
+            }
+        };
+    }, []);
 
     const loadLineGroups = useCallback(async () => {
         try {
@@ -598,14 +1007,14 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
     useEffect(() => {
         const timer = setInterval(() => {
             loadLineGroups();
-        }, 12000);
+        }, 3600000);  // 1 ชั่วโมง
 
         return () => clearInterval(timer);
     }, [loadLineGroups]);
 
     useEffect(() => {
         const groupId = String(selectedGroup?.id || '').trim();
-        if (!groupId) {
+        if (!groupId || !db) {
             setGroupMessages([]);
             setMessagesLoading(false);
             return undefined;
@@ -640,6 +1049,8 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
                         : '';
                     const viewUrl = String(raw.viewUrl || externalContentUrl || fallbackViewUrl).trim();
                     const hasAttachment = hasAttachmentType || Boolean(raw.hasAttachment && hasAttachmentType);
+                    const latitude = Number(raw.latitude);
+                    const longitude = Number(raw.longitude);
 
                     return {
                         id: docSnap.id,
@@ -663,8 +1074,12 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
                         hasAttachment,
                         viewUrl,
                         previewImageUrl: String(raw.previewImageUrl || '').trim(),
+                        flexAltText: String(raw.flexAltText || raw.altText || '').trim(),
+                        flexContents: raw.flexContents || raw.contents || null,
                         locationTitle: String(raw.locationTitle || '').trim(),
-                        locationAddress: String(raw.locationAddress || '').trim()
+                        locationAddress: String(raw.locationAddress || '').trim(),
+                        latitude: Number.isFinite(latitude) ? latitude : null,
+                        longitude: Number.isFinite(longitude) ? longitude : null
                     };
                 });
 
@@ -691,62 +1106,49 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
     }, [selectedGroup?.id]);
 
     useEffect(() => {
-        const el = chatScrollRef.current;
-        if (!el) {
-            shouldStickToBottomRef.current = true;
-            return undefined;
-        }
-
-        const updateStickState = () => {
-            const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-            shouldStickToBottomRef.current = distanceFromBottom <= 96;
-        };
-
-        updateStickState();
-        el.addEventListener('scroll', updateStickState, { passive: true });
-
-        return () => {
-            el.removeEventListener('scroll', updateStickState);
-        };
-    }, [selectedGroup?.id, messagesLoading]);
+        setTaskStatusFilter('all');
+    }, [selectedGroup?.id]);
 
     useEffect(() => {
-        if (messagesLoading) {
+        if (!isLineSendPopupOpen || !isLineSendPopupVisible) {
             return;
         }
 
-        const el = chatScrollRef.current;
-        if (!el) {
+        const focusTimer = setTimeout(() => {
+            lineSendModalInputRef.current?.focus();
+        }, 0);
+
+        const onKeyDown = (event) => {
+            if (event.key === 'Escape') {
+                closeLineSendPopup();
+            }
+        };
+
+        window.addEventListener('keydown', onKeyDown);
+        return () => {
+            clearTimeout(focusTimer);
+            window.removeEventListener('keydown', onKeyDown);
+        };
+    }, [closeLineSendPopup, isLineSendPopupOpen, isLineSendPopupVisible]);
+
+    useEffect(() => {
+        if (!isLineSendPopupOpen || !isLineSendPopupVisible) {
             return;
         }
 
-        const currentGroupId = String(selectedGroup?.id || '').trim();
-        const groupChanged = previousChatGroupIdRef.current !== currentGroupId;
-        if (groupChanged) {
-            previousChatGroupIdRef.current = currentGroupId;
-            shouldStickToBottomRef.current = true;
-        }
-
-        if (!groupChanged && !shouldStickToBottomRef.current) {
+        const chatPanel = lineSendModalChatScrollRef.current;
+        if (!chatPanel) {
             return;
         }
 
         requestAnimationFrame(() => {
-            const behavior = groupChanged ? 'auto' : 'smooth';
-            try {
-                el.scrollTo({
-                    top: el.scrollHeight,
-                    behavior
-                });
-            } catch {
-                el.scrollTop = el.scrollHeight;
-            }
+            chatPanel.scrollTop = chatPanel.scrollHeight;
         });
-    }, [messagesLoading, groupMessages.length, selectedGroup?.id]);
+    }, [isLineSendPopupOpen, isLineSendPopupVisible, groupMessages.length]);
 
     useEffect(() => {
         const groupId = String(selectedGroup?.id || '').trim();
-        if (!groupId) {
+        if (!groupId || !db) {
             setGroupUserNameByLineId({});
             return undefined;
         }
@@ -783,9 +1185,31 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
         return () => unsubscribe();
     }, [selectedGroup?.id]);
 
+    useEffect(() => {
+        const persistedTaskIds = new Set(
+            (tasks || [])
+                .map((task) => String(task?.id || '').trim())
+                .filter(Boolean)
+        );
+
+        if (persistedTaskIds.size === 0) {
+            return;
+        }
+
+        setOptimisticCapturedTasks((previous) => {
+            const next = (previous || []).filter((task) => {
+                const taskId = String(task?.id || '').trim();
+                return taskId && !persistedTaskIds.has(taskId);
+            });
+
+            return next.length === (previous || []).length ? previous : next;
+        });
+    }, [tasks]);
+
     const handleSendGroupMessage = useCallback(async () => {
         const groupId = String(selectedGroup?.id || '').trim();
         const text = String(outgoingMessage || '').trim();
+        const mentionCandidates = buildMentionCandidatesFromOutgoingText(text, groupUserNameByLineId);
         const activeReply = replyTarget && String(replyTarget?.lineMessageId || '').trim()
             ? replyTarget
             : null;
@@ -802,6 +1226,7 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
                 body: JSON.stringify({
                     groupId,
                     text,
+                    mentionCandidates,
                     replyToLineMessageId: activeReply?.lineMessageId || '',
                     replyPreviewText: activeReply?.previewText || ''
                 })
@@ -812,6 +1237,42 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
                 throw new Error(data?.detail || data?.error || 'ส่งข้อความไม่สำเร็จ');
             }
 
+            // Show newly captured task immediately in UI while waiting for Firestore snapshot propagation.
+            const taskCaptureTaskId = String(data?.taskCapture?.taskId || '').trim();
+            const taskCaptureCreated = Boolean(data?.taskCapture?.created);
+            if (taskCaptureCreated && taskCaptureTaskId) {
+                const optimisticTask = {
+                    id: taskCaptureTaskId,
+                    projectId: groupId,
+                    title: text,
+                    name: text,
+                    assignee: 'สมาชิกในกลุ่ม',
+                    assignees: [],
+                    lineAssigneeIds: [],
+                    lineAssigneeNames: [],
+                    status: 'in-progress',
+                    type: 'individual',
+                    source: 'line-tagged-task',
+                    lineMessageId: taskCaptureTaskId.replace(/^line_task_/, ''),
+                    sourceText: text,
+                    createdAt: new Date().toISOString(),
+                    updatedAt: new Date().toISOString(),
+                    formatIssues: []
+                };
+
+                setOptimisticCapturedTasks((previous) => {
+                    const exists = (previous || []).some((task) => {
+                        return String(task?.id || '').trim() === taskCaptureTaskId;
+                    });
+
+                    if (exists) {
+                        return previous;
+                    }
+
+                    return [optimisticTask, ...(previous || [])].slice(0, 120);
+                });
+            }
+
             setOutgoingMessage('');
             setReplyTarget(null);
         } catch (err) {
@@ -820,11 +1281,48 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
         } finally {
             setSendingMessage(false);
         }
-    }, [selectedGroup?.id, outgoingMessage, replyTarget, sendingMessage]);
+    }, [selectedGroup?.id, outgoingMessage, groupUserNameByLineId, replyTarget, sendingMessage]);
 
     const canSendGroupMessage = Boolean(
         selectedGroup && !sendingMessage && String(outgoingMessage || '').trim()
     );
+
+    const handleDeleteTask = useCallback(async (task) => {
+        const taskId = String(task?.id || '').trim();
+        if (!taskId || deletingTaskId === taskId) {
+            return;
+        }
+
+        if (typeof onDeleteTask !== 'function') {
+            alert('ยังไม่สามารถลบงานได้ในตอนนี้');
+            return;
+        }
+
+        const taskTitle = resolveTaskTitle(task);
+        const confirmed = window.confirm(`ต้องการลบงาน "${taskTitle}" ใช่หรือไม่?`);
+        if (!confirmed) {
+            return;
+        }
+
+        setDeletingTaskId(taskId);
+        try {
+            await onDeleteTask(taskId);
+
+            setOptimisticCapturedTasks((previous) => {
+                return (previous || []).filter((item) => String(item?.id || '').trim() !== taskId);
+            });
+
+            setSelectedTask((current) => {
+                const currentId = String(current?.id || '').trim();
+                return currentId === taskId ? null : current;
+            });
+        } catch (err) {
+            console.error('Delete task failed:', err);
+            alert(`ลบงานไม่สำเร็จ: ${err?.message || 'Unknown error'}`);
+        } finally {
+            setDeletingTaskId('');
+        }
+    }, [deletingTaskId, onDeleteTask]);
 
     const handleCopyLiffRegisterLink = useCallback(async () => {
         const groupId = String(selectedGroup?.id || '').trim();
@@ -975,6 +1473,29 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
             });
         }
     }, [groupTypeMap, loadLineGroups]);
+
+    const handleRenameGroup = useCallback(async (groupId, newName) => {
+        const id = String(groupId || '').trim();
+        const name = String(newName || '').trim();
+        if (!id || !name) {
+            setRenamingGroupId('');
+            return;
+        }
+        if (!db) {
+            setLineGroups((prev) => prev.map((g) => g.id === id ? { ...g, name } : g));
+            setRenamingGroupId('');
+            return;
+        }
+        try {
+            await updateDoc(doc(db, 'projects', id), { name, updatedAt: new Date().toISOString() });
+            setLineGroups((prev) => prev.map((g) => g.id === id ? { ...g, name } : g));
+        } catch (err) {
+            console.error('Rename group failed:', err);
+            alert(`เปลี่ยนชื่อกลุ่มไม่สำเร็จ: ${err?.message || 'Unknown error'}`);
+        } finally {
+            setRenamingGroupId('');
+        }
+    }, []);
 
     const handleDeleteGroup = useCallback(async (group) => {
         const groupId = String(group?.id || '').trim();
@@ -1479,6 +2000,8 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
             }
         }
 
+        openLineSendPopup();
+
         setPendingReplyJump({
             projectId: targetProjectId,
             lineMessageId: targetLineMessageId,
@@ -1486,7 +2009,7 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
             missingLoadedAlert
         });
         setSelectedTask(null);
-    }, [groups, onUpdateTask, selectedGroup?.id]);
+    }, [groups, onUpdateTask, openLineSendPopup, selectedGroup?.id]);
 
     const handleJumpToTaskReply = useCallback((task, lineMessageId) => {
         handleJumpToTaskMessage(task, lineMessageId, {
@@ -1534,7 +2057,11 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
             return;
         }
 
-        const chatRoot = chatScrollRef.current;
+        if (!isLineSendPopupOpen || !isLineSendPopupVisible) {
+            return;
+        }
+
+        const chatRoot = lineSendModalChatScrollRef.current;
         if (!chatRoot) {
             return;
         }
@@ -1563,16 +2090,96 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
                 currentValue === targetLineMessageId ? '' : currentValue
             );
         }, 3000);
-    }, [pendingReplyJump, selectedGroup?.id, messagesLoading, groupMessages]);
+    }, [pendingReplyJump, selectedGroup?.id, messagesLoading, groupMessages, isLineSendPopupOpen, isLineSendPopupVisible]);
+
+    const visibleTasks = useMemo(() => {
+        const mergedById = new Map();
+
+        for (const task of (optimisticCapturedTasks || [])) {
+            const taskId = String(task?.id || '').trim();
+            if (!taskId) {
+                continue;
+            }
+
+            mergedById.set(taskId, task);
+        }
+
+        for (const task of (tasks || [])) {
+            const taskId = String(task?.id || '').trim();
+            if (!taskId) {
+                continue;
+            }
+
+            // Persisted Firestore docs always win over optimistic placeholders.
+            mergedById.set(taskId, task);
+        }
+
+        return [...mergedById.values()];
+    }, [optimisticCapturedTasks, tasks]);
+
+    const selectedGroupTasks = useMemo(() => {
+        if (!selectedGroup) {
+            return [];
+        }
+
+        return visibleTasks.filter((task) => {
+            return String(task?.projectId || '').trim() === String(selectedGroup.id || '').trim();
+        });
+    }, [selectedGroup, visibleTasks]);
+
+    const taskStatusCounts = useMemo(() => {
+        const counts = {
+            all: selectedGroupTasks.length,
+            'in-progress': 0,
+            completed: 0,
+            abandoned: 0
+        };
+
+        for (const task of selectedGroupTasks) {
+            const status = normalizeTaskStatus(task?.status);
+            if (status === 'completed') {
+                counts.completed += 1;
+                continue;
+            }
+
+            if (status === 'abandoned') {
+                counts.abandoned += 1;
+                continue;
+            }
+
+            counts['in-progress'] += 1;
+        }
+
+        return counts;
+    }, [selectedGroupTasks]);
 
     const filteredTasks = useMemo(() => {
-        if (!selectedGroup) return [];
-        return (tasks || []).filter(task =>
-            task.projectId === selectedGroup.id &&
-            (task.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                task.title?.toLowerCase().includes(searchTerm.toLowerCase()))
-        );
-    }, [selectedGroup, searchTerm, tasks]);
+        const normalizedSearch = String(searchTerm || '').trim().toLowerCase();
+
+        return selectedGroupTasks.filter((task) => {
+            const status = normalizeTaskStatus(task?.status);
+            if (taskStatusFilter !== 'all' && status !== taskStatusFilter) {
+                return false;
+            }
+
+            if (!normalizedSearch) {
+                return true;
+            }
+
+            const taskName = String(task?.name || '').toLowerCase();
+            const taskTitle = String(task?.title || '').toLowerCase();
+            return taskName.includes(normalizedSearch) || taskTitle.includes(normalizedSearch);
+        });
+    }, [searchTerm, selectedGroupTasks, taskStatusFilter]);
+
+    const taskStatusFilters = useMemo(() => {
+        return [
+            { value: 'all', label: 'ทั้งหมด', count: taskStatusCounts.all },
+            { value: 'in-progress', label: 'กำลังทำ', count: taskStatusCounts['in-progress'] },
+            { value: 'completed', label: 'เสร็จแล้ว', count: taskStatusCounts.completed },
+            { value: 'abandoned', label: 'จัดเก็บ', count: taskStatusCounts.abandoned }
+        ];
+    }, [taskStatusCounts]);
 
     const lineUserNameMap = useMemo(() => {
         const map = new Map();
@@ -1647,165 +2254,6 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
         });
     }, [lineUserNameMap]);
 
-    const conversationSummary = useMemo(() => {
-        const typeCounts = {};
-        const participantIds = new Set();
-        const fileMessages = [];
-        const summarySourceMessages = [];
-
-        for (const message of (groupMessages || [])) {
-            const type = normalizeMessageType(message?.type);
-            typeCounts[type] = (typeCounts[type] || 0) + 1;
-
-            const senderName = resolveMessageSenderName(message, lineUserNameMap);
-            const rowText = String(message?.text || message?.previewText || '').trim()
-                || getMessagePreviewFallback(type, message);
-
-            if (rowText) {
-                summarySourceMessages.push({
-                    id: String(message?.id || '').trim(),
-                    senderName,
-                    isBot: Boolean(message?.isBot),
-                    type,
-                    createdAtText: String(message?.createdAtText || formatMessageDateTime(message?.createdAt) || '-').trim() || '-',
-                    text: rowText
-                });
-            }
-
-            const lineUserId = String(message?.lineUserId || '').trim();
-            if (lineUserId && !message?.isBot) {
-                participantIds.add(lineUserId);
-            }
-
-            if (message?.hasAttachment) {
-                fileMessages.push(message);
-            }
-        }
-
-        const participants = [...participantIds].map((lineUserId) => ({
-            lineUserId,
-            name: lineUserNameMap.get(lineUserId) || `LINE-${lineUserId.slice(-6)}`
-        }));
-
-        const sortedTypeCounts = Object.entries(typeCounts)
-            .sort((a, b) => b[1] - a[1])
-            .map(([type, count]) => ({ type, count }));
-
-        const latestMessage = (groupMessages || []).length > 0
-            ? groupMessages[groupMessages.length - 1]
-            : null;
-
-        return {
-            totalMessages: (groupMessages || []).length,
-            totalParticipants: participants.length,
-            participants,
-            typeCounts: sortedTypeCounts,
-            fileMessages: fileMessages.slice(-25),
-            latestMessageAt: latestMessage?.createdAt || null,
-            latestMessageAtText: latestMessage ? formatMessageDateTime(latestMessage.createdAt) : '-',
-            summarySourceMessages
-        };
-    }, [groupMessages, lineUserNameMap]);
-
-    const handleGenerateConversationSummary = useCallback(async () => {
-        if (conversationAiSummaryLoading) {
-            return;
-        }
-
-        const groupId = String(selectedGroup?.id || '').trim();
-        if (!groupId) {
-            alert('กรุณาเลือกกลุ่มก่อน');
-            return;
-        }
-
-        const messages = Array.isArray(conversationSummary?.summarySourceMessages)
-            ? conversationSummary.summarySourceMessages
-            : [];
-
-        if (messages.length === 0) {
-            alert('ยังไม่มีข้อความสำหรับสรุป');
-            return;
-        }
-
-        setConversationAiSummaryLoading(true);
-        setConversationAiSummaryError('');
-
-        try {
-            const res = await fetch('/api/summarize-conversation', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    groupId,
-                    groupName: selectedGroup?.name || '',
-                    latestMessageAtText: conversationSummary?.latestMessageAtText || '',
-                    messages
-                })
-            });
-
-            const data = await res.json().catch(() => ({}));
-            if (!res.ok) {
-                throw new Error(data?.detail || data?.error || `สรุปไม่สำเร็จ (HTTP ${res.status})`);
-            }
-
-            const summaryText = String(data?.summary || '').trim();
-            if (!summaryText) {
-                throw new Error('Azure OpenAI ไม่ได้ส่งข้อความสรุปกลับมา');
-            }
-
-            setConversationAiSummary(summaryText);
-            setConversationAiSummaryMessageCount(messages.length);
-        } catch (err) {
-            console.error('Generate conversation summary failed:', err);
-            setConversationAiSummaryError(err?.message || 'สรุปข้อความไม่สำเร็จ');
-        } finally {
-            setConversationAiSummaryLoading(false);
-        }
-    }, [conversationAiSummaryLoading, conversationSummary?.latestMessageAtText, conversationSummary?.summarySourceMessages, selectedGroup?.id, selectedGroup?.name]);
-
-    const handleCopyConversationSummaryPrompt = useCallback(async () => {
-        const summaryText = String(conversationAiSummary || '').trim();
-        if (!summaryText) {
-            alert('ยังไม่มีสรุปให้คัดลอก');
-            return;
-        }
-
-        try {
-            if (navigator?.clipboard?.writeText) {
-                await navigator.clipboard.writeText(summaryText);
-                alert('คัดลอกสรุปแล้ว');
-                return;
-            }
-        } catch (err) {
-            console.error('Copy conversation summary failed:', err);
-        }
-
-        window.prompt('คัดลอกสรุปนี้', summaryText);
-    }, [conversationAiSummary]);
-
-    useEffect(() => {
-        setConversationAiSummary('');
-        setConversationAiSummaryError('');
-        setConversationAiSummaryMessageCount(0);
-        setConversationAiSummaryLoading(false);
-    }, [selectedGroup?.id]);
-
-    useEffect(() => {
-        const hasGroup = Boolean(String(selectedGroup?.id || '').trim());
-        if (!hasGroup || messagesLoading || conversationAiSummaryLoading) {
-            return;
-        }
-
-        const sourceCount = conversationSummary.summarySourceMessages.length;
-        if (sourceCount === 0 || conversationAiSummaryMessageCount > 0) {
-            return;
-        }
-
-        handleGenerateConversationSummary();
-    }, [conversationAiSummaryLoading, conversationAiSummaryMessageCount, conversationSummary.summarySourceMessages.length, handleGenerateConversationSummary, messagesLoading, selectedGroup?.id]);
-
-    const summaryNeedsRefresh = conversationAiSummaryMessageCount > 0
-        && conversationSummary.summarySourceMessages.length !== conversationAiSummaryMessageCount;
-
     const getTypeColor = (type) => {
         switch (type) {
             case 'unset': return '#64748b';
@@ -1834,11 +2282,13 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
     ];
 
     const getStatusBadge = (status) => {
-        switch (status) {
+        switch (normalizeTaskStatus(status)) {
             case 'completed':
                 return <span className="flex items-center gap-1 text-xs px-2 py-1 bg-green-100 text-green-700 rounded-full"><CheckCircle size={12} />เสร็จแล้ว</span>;
+            case 'abandoned':
+                return <span className="flex items-center gap-1 text-xs px-2 py-1 bg-slate-100 text-slate-700 rounded-full"><Archive size={12} />จัดเก็บ</span>;
             case 'in-progress':
-                return null;
+                return <span className="flex items-center gap-1 text-xs px-2 py-1 bg-blue-100 text-blue-700 rounded-full"><Clock size={12} />กำลังทำ</span>;
             default:
                 return <span className="flex items-center gap-1 text-xs px-2 py-1 bg-gray-100 text-gray-700 rounded-full"><Clock size={12} />รอดำเนินการ</span>;
         }
@@ -1851,6 +2301,7 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
             case 'video': return 'วิดีโอ';
             case 'audio': return 'เสียง';
             case 'file': return 'ไฟล์';
+            case 'flex': return 'Flex';
             case 'sticker': return 'สติกเกอร์';
             case 'location': return 'ตำแหน่ง';
             default: return type || 'อื่นๆ';
@@ -1864,6 +2315,7 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
                     task={selectedTask}
                     employees={employees}
                     onClose={() => setSelectedTask(null)}
+                    onDelete={handleDeleteTask}
                     onJumpToReply={handleJumpToTaskReply}
                     onJumpToQuestion={handleJumpToTaskQuestion}
                     onUpdate={(id, data) => {
@@ -2005,7 +2457,48 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
                                     />
                                     <div>
                                         <div className="flex items-center gap-2">
-                                            <h2 className="text-xl font-bold text-slate-900 dark:text-white">{selectedGroup.name}</h2>
+                                            {renamingGroupId === selectedGroup.id ? (
+                                                <>
+                                                    <input
+                                                        autoFocus
+                                                        value={renameValue}
+                                                        onChange={(e) => setRenameValue(e.target.value)}
+                                                        onKeyDown={(e) => {
+                                                            if (e.key === 'Enter') handleRenameGroup(selectedGroup.id, renameValue);
+                                                            if (e.key === 'Escape') setRenamingGroupId('');
+                                                        }}
+                                                        className="text-xl font-bold bg-transparent border-b-2 border-orange-400 outline-none text-slate-900 dark:text-white w-48"
+                                                    />
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => handleRenameGroup(selectedGroup.id, renameValue)}
+                                                        className="p-1 rounded-lg text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-500/15"
+                                                        title="บันทึกชื่อ"
+                                                    >
+                                                        <Check size={16} />
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setRenamingGroupId('')}
+                                                        className="p-1 rounded-lg text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700"
+                                                        title="ยกเลิก"
+                                                    >
+                                                        <X size={16} />
+                                                    </button>
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <h2 className="text-xl font-bold text-slate-900 dark:text-white">{selectedGroup.name}</h2>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => { setRenameValue(selectedGroup.name); setRenamingGroupId(selectedGroup.id); }}
+                                                        className="p-1 rounded-lg text-slate-400 hover:text-orange-500 hover:bg-orange-50 dark:hover:bg-orange-500/15 transition-colors"
+                                                        title="เปลี่ยนชื่อกลุ่ม"
+                                                    >
+                                                        <Pencil size={14} />
+                                                    </button>
+                                                </>
+                                            )}
                                             <span
                                                 className="px-2 py-0.5 text-xs rounded-full text-white"
                                                 style={{ backgroundColor: getTypeColor(selectedGroup.type) }}
@@ -2016,12 +2509,16 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
                                         <div className="flex items-center gap-3 mt-1 text-sm text-slate-500">
                                             <span className="flex items-center gap-1"><Users size={14} /> {selectedGroup.members} คน</span>
                                             <span>•</span>
-                                            <span className="flex items-center gap-1"><MessageCircle size={14} /> {filteredTasks.length} งาน</span>
+                                            <span className="flex items-center gap-1"><MessageCircle size={14} /> {filteredTasks.length}/{taskStatusCounts.all} งาน</span>
                                         </div>
                                     </div>
                                 </div>
                                 <div className="flex items-center gap-2">
-                                    <button className="flex items-center gap-2 px-4 py-2 border border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800">
+                                    <button
+                                        type="button"
+                                        onClick={openLineSendPopup}
+                                        className="flex items-center gap-2 px-4 py-2 border border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
+                                    >
                                         <Send size={16} />
                                         ส่ง LINE
                                     </button>
@@ -2036,63 +2533,91 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
 
                     {/* Task List */}
                     <div className="bg-white dark:bg-slate-800/50 rounded-2xl border border-slate-200/60 dark:border-white/10 overflow-hidden">
-                        <div className="p-4 border-b border-slate-200/60 dark:border-white/10 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                            <h3 className="font-semibold text-slate-900 dark:text-white">รายการงาน</h3>
+                        <div className="p-4 border-b border-slate-200/60 dark:border-white/10 space-y-3">
+                            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                                <h3 className="font-semibold text-slate-900 dark:text-white">รายการงาน</h3>
+
+                                {selectedGroup && (
+                                    <div className="flex flex-wrap items-center gap-2 lg:justify-end">
+                                        <select
+                                            value={selectedGroup.type}
+                                            onChange={(e) => handleGroupTypeChange(selectedGroup.id, e.target.value)}
+                                            disabled={Boolean(groupTypeSavingMap[selectedGroup.id]) || deletingGroupId === selectedGroup.id || syncingGroupId === selectedGroup.id || recountingGroupId === selectedGroup.id}
+                                            className="min-w-[170px] text-xs rounded-lg border px-2 py-1.5 outline-none disabled:opacity-60 disabled:cursor-not-allowed bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-200"
+                                        >
+                                            {groupTypeOptions.map((option) => (
+                                                <option key={option.value} value={option.value}>{option.label}</option>
+                                            ))}
+                                        </select>
+
+                                        <button
+                                            onClick={() => handleSyncGroup(selectedGroup)}
+                                            disabled={Boolean(syncingGroupId) || deletingGroupId === selectedGroup.id || recountingGroupId === selectedGroup.id}
+                                            className="text-xs rounded-lg border px-3 py-1.5 transition-colors disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-1 bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700"
+                                        >
+                                            <Send size={12} />
+                                            ซิงก์กลุ่มนี้
+                                        </button>
+
+                                        <button
+                                            onClick={() => handleRecountGroupMembers(selectedGroup)}
+                                            disabled={Boolean(recountingGroupId) || deletingGroupId === selectedGroup.id || syncingGroupId === selectedGroup.id || archivingGroupId === selectedGroup.id}
+                                            className="text-xs rounded-lg border px-3 py-1.5 transition-colors disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-1 bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700"
+                                        >
+                                            <RefreshCcw size={12} />
+                                            รีนับสมาชิก
+                                        </button>
+
+                                        <button
+                                            onClick={() => handleArchiveGroupTasks(selectedGroup)}
+                                            disabled={Boolean(archivingGroupId) || deletingGroupId === selectedGroup.id || syncingGroupId === selectedGroup.id || recountingGroupId === selectedGroup.id}
+                                            className="text-xs rounded-lg border px-3 py-1.5 transition-colors disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-1 border-amber-300 dark:border-amber-800/70 text-amber-700 dark:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-900/20"
+                                        >
+                                            <Archive size={12} />
+                                            {archivingGroupId === selectedGroup.id ? 'กำลังจัดเก็บ...' : 'จัดเก็บ task กลุ่มนี้'}
+                                        </button>
+
+                                        <button
+                                            onClick={() => handleDeleteGroup(selectedGroup)}
+                                            disabled={deletingGroupId === selectedGroup.id || syncingGroupId === selectedGroup.id || recountingGroupId === selectedGroup.id || archivingGroupId === selectedGroup.id}
+                                            className="text-xs rounded-lg border px-3 py-1.5 transition-colors disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-1 border-red-300 dark:border-red-800 text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30"
+                                        >
+                                            <Trash2 size={12} />
+                                            ลบกลุ่มนี้
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
 
                             {selectedGroup && (
-                                <div className="flex flex-wrap items-center gap-2 lg:justify-end">
-                                    <select
-                                        value={selectedGroup.type}
-                                        onChange={(e) => handleGroupTypeChange(selectedGroup.id, e.target.value)}
-                                        disabled={Boolean(groupTypeSavingMap[selectedGroup.id]) || deletingGroupId === selectedGroup.id || syncingGroupId === selectedGroup.id || recountingGroupId === selectedGroup.id}
-                                        className="min-w-[170px] text-xs rounded-lg border px-2 py-1.5 outline-none disabled:opacity-60 disabled:cursor-not-allowed bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-200"
-                                    >
-                                        {groupTypeOptions.map((option) => (
-                                            <option key={option.value} value={option.value}>{option.label}</option>
-                                        ))}
-                                    </select>
-
-                                    <button
-                                        onClick={() => handleSyncGroup(selectedGroup)}
-                                        disabled={Boolean(syncingGroupId) || deletingGroupId === selectedGroup.id || recountingGroupId === selectedGroup.id}
-                                        className="text-xs rounded-lg border px-3 py-1.5 transition-colors disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-1 bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700"
-                                    >
-                                        <Send size={12} />
-                                        ซิงก์กลุ่มนี้
-                                    </button>
-
-                                    <button
-                                        onClick={() => handleRecountGroupMembers(selectedGroup)}
-                                        disabled={Boolean(recountingGroupId) || deletingGroupId === selectedGroup.id || syncingGroupId === selectedGroup.id || archivingGroupId === selectedGroup.id}
-                                        className="text-xs rounded-lg border px-3 py-1.5 transition-colors disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-1 bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700"
-                                    >
-                                        <RefreshCcw size={12} />
-                                        รีนับสมาชิก
-                                    </button>
-
-                                    <button
-                                        onClick={() => handleArchiveGroupTasks(selectedGroup)}
-                                        disabled={Boolean(archivingGroupId) || deletingGroupId === selectedGroup.id || syncingGroupId === selectedGroup.id || recountingGroupId === selectedGroup.id}
-                                        className="text-xs rounded-lg border px-3 py-1.5 transition-colors disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-1 border-amber-300 dark:border-amber-800/70 text-amber-700 dark:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-900/20"
-                                    >
-                                        <Archive size={12} />
-                                        {archivingGroupId === selectedGroup.id ? 'กำลังจัดเก็บ...' : 'จัดเก็บ task กลุ่มนี้'}
-                                    </button>
-
-                                    <button
-                                        onClick={() => handleDeleteGroup(selectedGroup)}
-                                        disabled={deletingGroupId === selectedGroup.id || syncingGroupId === selectedGroup.id || recountingGroupId === selectedGroup.id || archivingGroupId === selectedGroup.id}
-                                        className="text-xs rounded-lg border px-3 py-1.5 transition-colors disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-1 border-red-300 dark:border-red-800 text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30"
-                                    >
-                                        <Trash2 size={12} />
-                                        ลบกลุ่มนี้
-                                    </button>
+                                <div className="flex items-center gap-2 overflow-x-auto custom-scroll pb-1">
+                                    {taskStatusFilters.map((statusItem) => {
+                                        const isActive = taskStatusFilter === statusItem.value;
+                                        return (
+                                            <button
+                                                key={statusItem.value}
+                                                type="button"
+                                                onClick={() => setTaskStatusFilter(statusItem.value)}
+                                                className={`shrink-0 inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-semibold transition-colors ${isActive
+                                                    ? 'bg-orange-500 border-orange-500 text-white'
+                                                    : 'bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:border-orange-300'
+                                                    }`}
+                                            >
+                                                <span>{statusItem.label}</span>
+                                                <span className={`rounded-full px-1.5 py-0.5 text-[10px] ${isActive ? 'bg-white/20 text-white' : 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-200'}`}>
+                                                    {statusItem.count}
+                                                </span>
+                                            </button>
+                                        );
+                                    })}
                                 </div>
                             )}
                         </div>
                         <div className="p-4">
                             {filteredTasks.length > 0 ? (
-                                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                                <>
+                                    <p className="mb-2 text-xs text-slate-500 dark:text-slate-400">เลื่อนซ้าย-ขวาเพื่อดูแฟ้มการ์ดงานทั้งหมด</p>
+                                    <div className="flex gap-4 overflow-x-auto custom-scroll overscroll-x-contain pb-4 snap-x snap-mandatory">
                                     {filteredTasks.map((task) => {
                                         const formatIssues = Array.isArray(task?.formatIssues) ? task.formatIssues : [];
                                         const assigneeIds = Array.isArray(task?.assignees) ? task.assignees : [];
@@ -2100,11 +2625,13 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
                                             .map((employeeId) => employeeById.get(String(employeeId || '').trim()))
                                             .filter(Boolean)
                                             .slice(0, 4);
+                                        const taskId = String(task?.id || '').trim();
+                                        const isDeletingTask = deletingTaskId === taskId;
                                         const replyMeta = getTaskLatestReplyMeta(task);
                                         const hasAnyReply = replyMeta.hasReply;
                                         const hasUnreadReply = isTaskReplyUnread(task);
                                         const unreadReplyOverdue = isTaskReplyUnreadOverdue(task);
-                                        const accentColor = task?.status === 'abandoned'
+                                        const accentColor = normalizeTaskStatus(task?.status) === 'abandoned'
                                             ? '#64748b'
                                             : (assigneeEmployees[0]?.color || '#24387E');
                                         const cardBorderColor = hasAnyReply ? '#ef4444' : accentColor;
@@ -2112,7 +2639,16 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
                                         return (
                                             <div
                                                 key={task.id}
-                                                className="relative mt-3"
+                                                role="button"
+                                                tabIndex={0}
+                                                onClick={() => setSelectedTask(task)}
+                                                onKeyDown={(event) => {
+                                                    if (event.key === 'Enter' || event.key === ' ') {
+                                                        event.preventDefault();
+                                                        setSelectedTask(task);
+                                                    }
+                                                }}
+                                                className="group relative mt-3 min-w-[300px] sm:min-w-[340px] lg:min-w-[360px] max-w-[420px] snap-start shrink-0 cursor-pointer"
                                             >
                                                 <div
                                                     className="absolute left-0 rounded-t-xl"
@@ -2128,8 +2664,20 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
 
                                                 <button
                                                     type="button"
-                                                    onClick={() => setSelectedTask(task)}
-                                                    className="group w-full text-left relative rounded-tl-none rounded-tr-2xl rounded-b-3xl border p-5 transition-all duration-300 bg-slate-50 dark:bg-white/[0.02] hover:bg-white dark:hover:bg-[#111113] hover:-translate-y-0.5"
+                                                    onClick={(event) => {
+                                                        event.stopPropagation();
+                                                        handleDeleteTask(task);
+                                                    }}
+                                                    onKeyDown={(event) => event.stopPropagation()}
+                                                    disabled={isDeletingTask}
+                                                    title="ลบงาน"
+                                                    className="absolute top-2 right-2 z-10 inline-flex h-7 w-7 items-center justify-center rounded-lg border border-red-200 bg-white/85 text-red-500 transition-colors hover:bg-red-50 disabled:opacity-60 disabled:cursor-not-allowed dark:border-red-800/60 dark:bg-slate-900/85 dark:text-red-300 dark:hover:bg-red-950/30"
+                                                >
+                                                    <Trash2 size={14} />
+                                                </button>
+
+                                                <div
+                                                    className="w-full text-left relative rounded-tl-none rounded-tr-2xl rounded-b-3xl border p-5 pr-11 transition-all duration-300 bg-slate-50 dark:bg-white/[0.02] hover:bg-white dark:hover:bg-[#111113] hover:-translate-y-0.5"
                                                     style={{
                                                         borderColor: `${cardBorderColor}66`,
                                                         boxShadow: `0 10px 26px -16px ${cardBorderColor}66`
@@ -2206,11 +2754,12 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
                                                             {task?.type === 'team' ? 'ทีม' : 'เดี่ยว'}
                                                         </span>
                                                     </div>
-                                                </button>
+                                                </div>
                                             </div>
                                         );
                                     })}
-                                </div>
+                                    </div>
+                                </>
                             ) : (
                                 <div className="p-8 text-center text-slate-500">
                                     <FolderKanban size={48} className="mx-auto mb-3 text-slate-300" />
@@ -2220,218 +2769,276 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
                         </div>
                     </div>
 
-                    {/* Conversation + Summary */}
-                    <div className="bg-white dark:bg-slate-800/50 rounded-2xl border border-slate-200/60 dark:border-white/10 overflow-hidden">
-                        <div className="p-4 border-b border-slate-200/60 dark:border-white/10">
-                            <h3 className="font-semibold text-slate-900 dark:text-white">สรุปการคุยและประวัติแชทกลุ่ม</h3>
-                            <p className="text-xs text-slate-500 mt-1">
-                                ซ้าย: สรุปภาพรวมการคุย | ขวา: ช่องแชทแบบอ่านง่าย
-                            </p>
+                    {isLineSendPopupOpen && selectedGroup && (
+                <div
+                    className={`fixed inset-0 z-[85] bg-slate-900/55 dark:bg-black/75 backdrop-blur-sm p-3 sm:p-4 flex items-center justify-center transition-opacity duration-200 ease-out ${isLineSendPopupVisible ? 'opacity-100' : 'opacity-0'}`}
+                    onClick={(event) => {
+                        if (event.target === event.currentTarget) {
+                            closeLineSendPopup();
+                        }
+                    }}
+                >
+                    <div className={`w-full max-w-5xl h-[88vh] rounded-3xl border border-slate-200/70 dark:border-white/10 bg-white dark:bg-slate-900 shadow-2xl overflow-hidden flex flex-col transition-all duration-200 ease-out transform-gpu ${isLineSendPopupVisible ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-3 scale-[0.98]'}`}>
+                        <div className="px-4 sm:px-5 py-3.5 border-b border-slate-200/70 dark:border-slate-700/80 flex items-center justify-between">
+                            <div>
+                                <p className="text-xs font-semibold text-slate-500 dark:text-slate-400">หน้าแชทกลุ่ม</p>
+                                <h3 className="text-base sm:text-lg font-bold text-slate-900 dark:text-white">{selectedGroup.name}</h3>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={closeLineSendPopup}
+                                className="w-8 h-8 rounded-lg border border-slate-200 dark:border-slate-700 flex items-center justify-center text-slate-500 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+                                aria-label="ปิดหน้าแชท"
+                            >
+                                <X size={14} />
+                            </button>
                         </div>
 
-                        <div className="grid grid-cols-1 lg:grid-cols-[minmax(320px,0.95fr)_minmax(0,1.05fr)] divide-y lg:divide-y-0 lg:divide-x divide-slate-200/60 dark:divide-white/10">
-                            <section className="p-4 lg:pr-1 space-y-4 lg:max-h-[500px] lg:overflow-y-auto custom-scroll overscroll-y-contain">
-                                <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-3">
-                                    <div className="mb-2 flex items-center justify-between gap-2">
-                                        <h4 className="text-sm font-semibold text-slate-900 dark:text-white">สรุปจากข้อความทั้งหมด (Azure OpenAI)</h4>
-                                        <div className="flex items-center gap-2">
-                                            <button
-                                                type="button"
-                                                onClick={handleGenerateConversationSummary}
-                                                disabled={conversationAiSummaryLoading || conversationSummary.summarySourceMessages.length === 0}
-                                                className="rounded-lg border border-slate-300 dark:border-slate-600 px-2.5 py-1 text-[11px] font-semibold text-slate-600 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-60 disabled:cursor-not-allowed"
-                                            >
-                                                {conversationAiSummaryLoading ? 'กำลังสรุป...' : 'สรุปใหม่'}
-                                            </button>
-                                            <button
-                                                type="button"
-                                                onClick={handleCopyConversationSummaryPrompt}
-                                                disabled={!conversationAiSummary}
-                                                className="rounded-lg border border-slate-300 dark:border-slate-600 px-2.5 py-1 text-[11px] font-semibold text-slate-600 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-60 disabled:cursor-not-allowed"
-                                            >
-                                                คัดลอกสรุป
-                                            </button>
+                        <div className="flex-1 p-3 sm:p-4 bg-gradient-to-b from-slate-50/90 via-sky-50/40 to-indigo-50/60 dark:from-slate-900/60 dark:via-slate-900/50 dark:to-indigo-950/30 min-h-0">
+                            <div className="rounded-[1.35rem] border border-slate-200/80 dark:border-slate-700/80 bg-white/90 dark:bg-slate-900/85 h-full flex flex-col overflow-hidden shadow-[0_22px_54px_-32px_rgba(15,23,42,0.45)]">
+                                <div
+                                    ref={lineSendModalChatScrollRef}
+                                    className="flex-1 overflow-y-auto custom-scroll overscroll-y-contain p-3 bg-[radial-gradient(circle_at_top_left,_rgba(56,189,248,0.18),_transparent_45%),radial-gradient(circle_at_bottom_right,_rgba(249,115,22,0.14),_transparent_45%)] dark:bg-[radial-gradient(circle_at_top_left,_rgba(14,165,233,0.18),_transparent_45%),radial-gradient(circle_at_bottom_right,_rgba(79,70,229,0.18),_transparent_45%)]"
+                                >
+                                    {messagesLoading ? (
+                                        <p className="text-xs text-slate-500 dark:text-slate-300">กำลังโหลดประวัติแชท...</p>
+                                    ) : groupMessages.length === 0 ? (
+                                        <div className="h-full flex flex-col items-center justify-center text-slate-500 dark:text-slate-300 text-sm">
+                                            <MessageCircle size={34} className="mb-2 text-slate-300 dark:text-slate-600" />
+                                            ยังไม่มีข้อความที่บันทึกไว้
                                         </div>
-                                    </div>
+                                    ) : groupMessages.map((message, index) => {
+                                        const isBotMessage = Boolean(message.isBot);
+                                        const senderName = resolveMessageSenderName(message, lineUserNameMap);
+                                        const senderIdentity = String(message?.lineUserId || '').trim() || senderName;
+                                        const previousMessage = index > 0 ? groupMessages[index - 1] : null;
+                                        const previousSenderName = previousMessage
+                                            ? resolveMessageSenderName(previousMessage, lineUserNameMap)
+                                            : '';
+                                        const previousSenderIdentity = previousMessage
+                                            ? (String(previousMessage?.lineUserId || '').trim() || previousSenderName)
+                                            : '';
+                                        const previousTime = toMessageDate(previousMessage?.createdAt)?.getTime() || 0;
+                                        const currentTime = toMessageDate(message?.createdAt)?.getTime() || 0;
+                                        const isSameSenderCluster = Boolean(previousMessage)
+                                            && Boolean(previousMessage?.isBot) === isBotMessage
+                                            && previousSenderIdentity === senderIdentity
+                                            && previousTime > 0
+                                            && currentTime > 0
+                                            && (currentTime - previousTime) <= (4 * 60 * 1000);
+                                        const blockSpacingClass = isSameSenderCluster
+                                            ? 'mt-1'
+                                            : (index === 0 ? '' : 'mt-3');
+                                        const lineMessageId = String(message?.lineMessageId || '').trim();
+                                        const messageType = normalizeMessageType(message?.type);
+                                        const quotedMessageId = String(message?.quotedMessageId || '').trim();
+                                        const quotedMessage = quotedMessageId
+                                            ? messageByLineId.get(quotedMessageId)
+                                            : null;
+                                        const quotedPreviewText = normalizeChatText(
+                                            message?.quotedPreviewText || quotedMessage?.text || quotedMessage?.previewText || ''
+                                        );
+                                        const replyText = quotedPreviewText || (quotedMessageId
+                                            ? `ข้อความเดิม #${quotedMessageId.slice(-6)}`
+                                            : '');
+                                        const messageDisplayText = messageType === 'text'
+                                            ? normalizeChatText(message?.text || message?.previewText || '')
+                                            : (normalizeChatText(message?.previewText || message?.text || '') || getMessagePreviewFallback(messageType, message));
+                                        const messageTypeLabel = getMessageTypeLabel(messageType);
+                                        const stickerImageUrl = messageType === 'sticker'
+                                            ? resolveStickerImageUrl(message)
+                                            : '';
+                                        const messageViewUrl = String(message?.viewUrl || '').trim();
+                                        const messageDownloadUrl = messageType === 'file'
+                                            ? buildMessageDownloadUrl(messageViewUrl, message?.fileName || '')
+                                            : '';
+                                        const mapViewUrl = messageType === 'location'
+                                            ? buildLocationMapUrl(message)
+                                            : '';
+                                        const flexPreview = messageType === 'flex'
+                                            ? resolveFlexPreview(message)
+                                            : null;
+                                        const messageTime = formatMessageClock(message?.createdAt) || message.createdAtText;
+                                        const canReply = Boolean(lineMessageId) && !isBotMessage;
+                                        const shouldShowIdentity = !isBotMessage && !isSameSenderCluster;
+                                        const avatarInitial = senderName.slice(0, 1).toUpperCase();
+                                        const isHighlightedMessage = highlightedLineMessageId && lineMessageId === highlightedLineMessageId;
+                                        const bubbleTone = isBotMessage
+                                            ? 'bg-[#9FE870] border-[#86D759] text-slate-900'
+                                            : 'bg-white border-slate-200/95 text-slate-800 dark:bg-slate-900/85 dark:border-slate-600/80 dark:text-slate-100';
+                                        const bubbleShape = isBotMessage
+                                            ? (isSameSenderCluster ? 'rounded-[1.1rem] rounded-tr-md' : 'rounded-[1.1rem] rounded-br-md')
+                                            : (isSameSenderCluster ? 'rounded-[1.1rem] rounded-tl-md' : 'rounded-[1.1rem] rounded-bl-md');
 
-                                    {conversationAiSummaryError && (
-                                        <p className="mb-2 rounded-lg border border-red-200 bg-red-50 px-2.5 py-1.5 text-xs text-red-700 dark:border-red-700/60 dark:bg-red-900/20 dark:text-red-300">
-                                            {conversationAiSummaryError}
-                                        </p>
-                                    )}
-
-                                    {summaryNeedsRefresh && !conversationAiSummaryLoading && (
-                                        <p className="mb-2 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-xs text-amber-700 dark:border-amber-700/60 dark:bg-amber-900/20 dark:text-amber-300">
-                                            มีข้อความใหม่เพิ่มหลังจากสรุปล่าสุด กด "สรุปใหม่" เพื่ออัปเดต
-                                        </p>
-                                    )}
-
-                                    {conversationAiSummary ? (
-                                        <pre className="max-h-72 overflow-y-auto custom-scroll overscroll-y-contain whitespace-pre-wrap break-words rounded-lg bg-slate-50 dark:bg-slate-900/30 px-2.5 py-2 text-xs leading-relaxed text-slate-700 dark:text-slate-200">
-                                            {conversationAiSummary}
-                                        </pre>
-                                    ) : (
-                                        <p className="rounded-lg bg-slate-50 dark:bg-slate-900/30 px-2.5 py-2 text-xs leading-relaxed text-slate-500 dark:text-slate-300">
-                                            กด "สรุปใหม่" เพื่อให้ Azure OpenAI สรุปจากข้อความแชททั้งหมดที่บันทึกไว้
-                                        </p>
-                                    )}
-                                </div>
-
-                                <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-3">
-                                    <h4 className="text-sm font-semibold text-slate-900 dark:text-white mb-2">ไฟล์และสื่อที่ส่งในแชท</h4>
-                                    <div className="space-y-2 max-h-44 overflow-y-auto custom-scroll overscroll-y-contain pr-1">
-                                        {conversationSummary.fileMessages.length > 0 ? conversationSummary.fileMessages.map((msg) => (
-                                            <div key={`file-${msg.id}`} className="flex items-center gap-2 text-xs bg-slate-50 dark:bg-slate-900/30 rounded-lg px-2 py-1.5">
-                                                <div className="min-w-0">
-                                                    <p className="truncate font-medium text-slate-700 dark:text-slate-200">{msg.fileName || msg.previewText}</p>
-                                                    <p className="text-slate-500">{getMessageTypeLabel(msg.type)} • {msg.createdAtText}</p>
-                                                </div>
-                                            </div>
-                                        )) : (
-                                            <p className="text-xs text-slate-500">ยังไม่มีไฟล์หรือสื่อแนบ</p>
-                                        )}
-                                    </div>
-                                </div>
-                            </section>
-
-                            <section className="p-4 bg-gradient-to-b from-slate-50/90 via-sky-50/40 to-indigo-50/60 dark:from-slate-900/60 dark:via-slate-900/50 dark:to-indigo-950/30">
-                                <div className="rounded-[1.4rem] border border-slate-200/80 dark:border-slate-700/80 bg-white/85 dark:bg-slate-900/75 h-[440px] md:h-[480px] lg:h-[500px] xl:h-[520px] flex flex-col overflow-hidden shadow-[0_22px_54px_-32px_rgba(15,23,42,0.45)] backdrop-blur-sm">
-                                    <div className="px-4 py-3 border-b border-slate-200/70 dark:border-slate-700/80 bg-gradient-to-r from-slate-100/80 via-white/90 to-indigo-100/70 dark:from-slate-900/80 dark:via-slate-900/70 dark:to-indigo-900/30 flex items-center justify-between">
-                                        <div>
-                                            <h4 className="text-sm font-semibold text-slate-900 dark:text-white">แชทกลุ่ม (หลังบอทเข้ากลุ่ม)</h4>
-                                            <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">อ่านย้อนหลังและตอบกลับได้ทันที</p>
-                                        </div>
-                                        <div className="flex items-center gap-2">
-                                            <span className="inline-flex items-center gap-1 rounded-full border border-emerald-300/70 dark:border-emerald-500/40 bg-emerald-100/90 dark:bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 dark:text-emerald-300">
-                                                <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                                                Live
-                                            </span>
-                                            <span className="text-xs text-slate-500 dark:text-slate-400">{groupMessages.length} ข้อความ</span>
-                                        </div>
-                                    </div>
-
-                                    <div
-                                        ref={chatScrollRef}
-                                        className="flex-1 overflow-y-auto custom-scroll overscroll-y-contain p-3 space-y-2 bg-[radial-gradient(circle_at_top_left,_rgba(56,189,248,0.18),_transparent_45%),radial-gradient(circle_at_bottom_right,_rgba(249,115,22,0.14),_transparent_45%)] dark:bg-[radial-gradient(circle_at_top_left,_rgba(14,165,233,0.18),_transparent_45%),radial-gradient(circle_at_bottom_right,_rgba(79,70,229,0.18),_transparent_45%)]"
-                                    >
-                                        {messagesLoading ? (
-                                            <p className="text-xs text-slate-500 dark:text-slate-300">กำลังโหลดประวัติแชท...</p>
-                                        ) : groupMessages.length === 0 ? (
-                                            <div className="h-full flex flex-col items-center justify-center text-slate-500 dark:text-slate-300 text-sm">
-                                                <MessageCircle size={34} className="mb-2 text-slate-300 dark:text-slate-600" />
-                                                ยังไม่มีข้อความที่บันทึกไว้
-                                            </div>
-                                        ) : groupMessages.map((message) => {
-                                            const isBotMessage = Boolean(message.isBot);
-                                            const senderName = resolveMessageSenderName(message, lineUserNameMap);
-                                            const quotedMessageId = String(message.quotedMessageId || '').trim();
-                                            const quotedMessage = quotedMessageId
-                                                ? messageByLineId.get(quotedMessageId)
-                                                : null;
-                                            const quotedPreviewText = normalizeChatText(
-                                                message.quotedPreviewText || quotedMessage?.text || quotedMessage?.previewText || ''
-                                            );
-                                            const replyText = quotedPreviewText || (quotedMessageId
-                                                ? `ข้อความเดิม #${quotedMessageId.slice(-6)}`
-                                                : '');
-                                            const canReply = Boolean(String(message.lineMessageId || '').trim());
-                                            const messageTypeLabel = getMessageTypeLabel(message.type);
-                                            const stickerImageUrl = message.type === 'sticker'
-                                                ? resolveStickerImageUrl(message)
-                                                : '';
-                                            const bubbleTone = isBotMessage
-                                                ? 'bg-gradient-to-br from-emerald-100 to-lime-50 border-emerald-200/90 dark:from-emerald-400/20 dark:to-lime-300/10 dark:border-emerald-400/35'
-                                                : 'bg-white/95 border-slate-200/95 dark:bg-slate-900/85 dark:border-slate-600/80';
-                                            const typeChipTone = isBotMessage
-                                                ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300'
-                                                : 'bg-slate-100 text-slate-700 dark:bg-slate-700/60 dark:text-slate-200';
-                                            const initial = senderName.slice(0, 1).toUpperCase();
-                                            const isHighlightedMessage = highlightedLineMessageId
-                                                && String(message?.lineMessageId || '').trim() === highlightedLineMessageId;
-                                            const messageDisplayText = message.type === 'text'
-                                                ? normalizeChatText(message?.text || message?.previewText || '')
-                                                : normalizeChatText(message?.previewText || '');
-                                            const shouldKeepBotSingleLine = isBotMessage
-                                                && message.type === 'text'
-                                                && messageDisplayText.length > 0
-                                                && messageDisplayText.length <= 16
-                                                && !/\s/u.test(messageDisplayText);
-
-                                            return (
-                                                <div key={message.id} className={`flex ${isBotMessage ? 'justify-end' : 'justify-start'}`}>
-                                                    <div className={`flex items-start gap-2.5 ${isBotMessage ? 'justify-end' : 'justify-start'}`}>
-                                                        {!isBotMessage && (
-                                                            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[#24387E] to-[#3357C9] text-white text-xs font-bold flex items-center justify-center shrink-0 shadow-sm ring-2 ring-white/70 dark:ring-slate-900/80">
-                                                                {initial}
+                                        return (
+                                            <div key={`popup-${message.id}`} className={`flex ${isBotMessage ? 'justify-end' : 'justify-start'} ${blockSpacingClass}`}>
+                                                <div className={`flex max-w-[92%] items-end gap-2 ${isBotMessage ? 'flex-row-reverse' : 'flex-row'}`}>
+                                                    {!isBotMessage && (
+                                                        shouldShowIdentity ? (
+                                                            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[#24387E] to-[#3F5BC7] text-white text-[11px] font-bold flex items-center justify-center shrink-0 shadow-sm ring-2 ring-white/80 dark:ring-slate-900/80">
+                                                                {avatarInitial}
                                                             </div>
+                                                        ) : (
+                                                            <div className="w-8 shrink-0" aria-hidden="true" />
+                                                        )
+                                                    )}
+
+                                                    <div className={`flex flex-col ${isBotMessage ? 'items-end' : 'items-start'}`}>
+                                                        {shouldShowIdentity && (
+                                                            <p className="mb-0.5 ml-1 text-[11px] font-semibold text-slate-600 dark:text-slate-300">{senderName}</p>
                                                         )}
 
-                                                        <div className={`flex flex-col ${isBotMessage ? 'items-end' : 'items-start'}`}>
-                                                            <p className={`mb-0.5 text-[11px] font-semibold text-slate-700 dark:text-slate-200 ${isBotMessage ? 'mr-1 text-right' : 'ml-1'}`}>
-                                                                {senderName}
-                                                            </p>
+                                                        <div className={`flex items-end gap-1.5 ${isBotMessage ? 'flex-row-reverse' : 'flex-row'}`}>
+                                                            <div
+                                                                data-line-message-id={lineMessageId}
+                                                                className={`max-w-[76vw] sm:max-w-[440px] border px-3 py-2.5 text-sm break-words shadow-[0_8px_20px_-16px_rgba(15,23,42,0.5)] ${bubbleTone} ${bubbleShape} ${isHighlightedMessage ? 'ring-2 ring-red-400/80 dark:ring-red-500/80' : ''}`}
+                                                            >
+                                                                {quotedMessageId && (
+                                                                    <div className="mb-2 rounded-lg border border-slate-200/90 bg-slate-50/90 px-2.5 py-1.5 dark:border-slate-600/80 dark:bg-slate-800/75">
+                                                                        <p className="text-[10px] font-semibold text-slate-500 dark:text-slate-300">[ข้อความตอบกับ]</p>
+                                                                        <p className="mt-0.5 text-xs text-slate-600 break-words dark:text-slate-200">{replyText || '-'}</p>
+                                                                    </div>
+                                                                )}
 
-                                                            <div className="flex items-end gap-1.5">
-                                                                <div
-                                                                    data-line-message-id={String(message?.lineMessageId || '').trim()}
-                                                                    className={`inline-block w-fit shrink-0 max-w-[88%] rounded-2xl border px-3.5 py-2.5 shadow-[0_10px_24px_-18px_rgba(15,23,42,0.5)] ${bubbleTone} ${isHighlightedMessage ? 'ring-2 ring-red-400/80 dark:ring-red-500/80' : ''}`}
-                                                                >
-                                                                    {quotedMessageId && (
-                                                                        <div className="mb-2.5 rounded-lg border border-slate-200/90 bg-slate-50/90 px-2.5 py-1.5 dark:border-slate-600/80 dark:bg-slate-800/75">
-                                                                            <p className="text-[10px] font-semibold text-slate-500 dark:text-slate-300">[ข้อความตอบกับ]</p>
-                                                                            <p className="mt-0.5 text-xs text-slate-600 break-words dark:text-slate-200">{replyText || '-'}</p>
-                                                                        </div>
-                                                                    )}
-
-                                                                    {message.type === 'sticker' ? (
-                                                                        <div className="space-y-1.5">
-                                                                            <p className={`inline-flex rounded-md px-2 py-0.5 text-[10px] font-semibold ${typeChipTone}`}>
+                                                                {messageType === 'sticker' ? (
+                                                                    <div className="space-y-1.5">
+                                                                        <p className="inline-flex rounded-md bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-700 dark:bg-slate-700/60 dark:text-slate-200">
+                                                                            {messageTypeLabel}
+                                                                        </p>
+                                                                        {stickerImageUrl && (
+                                                                            <img
+                                                                                src={stickerImageUrl}
+                                                                                alt={message?.previewText || 'sticker'}
+                                                                                className="max-h-36 rounded-xl border border-white/70 bg-white/80 p-1 dark:border-slate-700/70 dark:bg-slate-900/40"
+                                                                                loading="lazy"
+                                                                                onError={(event) => {
+                                                                                    event.currentTarget.style.display = 'none';
+                                                                                }}
+                                                                            />
+                                                                        )}
+                                                                        <p className="text-xs leading-normal whitespace-normal text-slate-700 dark:text-slate-100 break-words">
+                                                                            {message?.previewText || getMessagePreviewFallback('sticker', message)}
+                                                                        </p>
+                                                                    </div>
+                                                                ) : (
+                                                                    <>
+                                                                        {messageType !== 'text' && (
+                                                                            <p className="inline-flex mb-1 rounded-md bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-700 dark:bg-slate-700/60 dark:text-slate-200">
                                                                                 {messageTypeLabel}
                                                                             </p>
-                                                                            {stickerImageUrl && (
-                                                                                <img
-                                                                                    src={stickerImageUrl}
-                                                                                    alt={message.previewText || 'sticker'}
-                                                                                    className="max-h-36 rounded-xl border border-white/70 dark:border-slate-700/70 bg-white/80 dark:bg-slate-900/40 p-1"
-                                                                                    loading="lazy"
-                                                                                    onError={(event) => {
-                                                                                        event.currentTarget.style.display = 'none';
-                                                                                    }}
-                                                                                />
-                                                                            )}
-                                                                            <p className="text-xs leading-normal whitespace-normal text-slate-600 dark:text-slate-200 break-words">
-                                                                                {message.previewText || getMessagePreviewFallback('sticker', message)}
-                                                                            </p>
-                                                                        </div>
-                                                                    ) : (
-                                                                        <>
-                                                                            {message.type !== 'text' && (
-                                                                                <p className={`inline-flex mb-1 rounded-md px-2 py-0.5 text-[10px] font-semibold ${typeChipTone}`}>
-                                                                                    {messageTypeLabel}
+                                                                        )}
+                                                                        <p className="text-sm leading-normal whitespace-pre-wrap break-words">
+                                                                            {renderMessageTextWithLinks(messageDisplayText || '-')}
+                                                                        </p>
+
+                                                                        {messageType === 'flex' && (
+                                                                            <div className="mt-2 rounded-xl border border-sky-200/80 bg-sky-50/70 px-2.5 py-2 dark:border-sky-500/40 dark:bg-sky-500/10">
+                                                                                <p className="text-[11px] font-semibold text-sky-800 dark:text-sky-200">Flex Message</p>
+                                                                                <p className="mt-1 text-xs text-slate-700 dark:text-slate-200 break-words whitespace-pre-wrap">
+                                                                                    {renderMessageTextWithLinks(flexPreview?.title || messageDisplayText || '[Flex Message]')}
                                                                                 </p>
-                                                                            )}
-                                                                            <p className={`text-sm leading-normal text-slate-800 dark:text-slate-100 break-words ${shouldKeepBotSingleLine ? 'whitespace-nowrap' : 'whitespace-pre-wrap'}`}>{messageDisplayText || '-'}</p>
-                                                                        </>
-                                                                    )}
+                                                                                {flexPreview?.subtitle && (
+                                                                                    <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-300 break-words whitespace-pre-wrap">
+                                                                                        {renderMessageTextWithLinks(flexPreview.subtitle)}
+                                                                                    </p>
+                                                                                )}
+                                                                                {flexPreview?.actionUrl && (
+                                                                                    <a
+                                                                                        href={flexPreview.actionUrl}
+                                                                                        target="_blank"
+                                                                                        rel="noopener noreferrer"
+                                                                                        className="mt-2 inline-flex items-center rounded-md border border-sky-300 bg-white/90 px-2 py-1 text-[11px] font-semibold text-sky-700 hover:bg-sky-50 dark:border-sky-500/60 dark:bg-slate-900/60 dark:text-sky-200 dark:hover:bg-sky-500/10"
+                                                                                    >
+                                                                                        เปิดลิงก์ใน Flex
+                                                                                    </a>
+                                                                                )}
+                                                                            </div>
+                                                                        )}
 
-                                                                    {message.type === 'image' && message.viewUrl && (
+                                                                        {messageType === 'file' && (
+                                                                            <div className="mt-2 rounded-xl border border-slate-200/90 bg-slate-50/90 px-2.5 py-2 dark:border-slate-600/80 dark:bg-slate-800/75">
+                                                                                <p className="text-[11px] font-semibold text-slate-700 dark:text-slate-200">ไฟล์แนบ</p>
+                                                                                <p className="mt-0.5 text-xs text-slate-600 dark:text-slate-300 break-all">
+                                                                                    {message.fileName || messageDisplayText || 'ไฟล์แนบ'}
+                                                                                </p>
+                                                                            </div>
+                                                                        )}
+
+                                                                        {messageType === 'location' && mapViewUrl && (
+                                                                            <a
+                                                                                href={mapViewUrl}
+                                                                                target="_blank"
+                                                                                rel="noopener noreferrer"
+                                                                                className="mt-2 inline-flex items-center rounded-md border border-indigo-300/80 bg-indigo-50/80 px-2 py-1 text-[11px] font-semibold text-indigo-700 hover:bg-indigo-100/80 dark:border-indigo-500/50 dark:bg-indigo-500/10 dark:text-indigo-200 dark:hover:bg-indigo-500/20"
+                                                                            >
+                                                                                ดูแผนที่
+                                                                            </a>
+                                                                        )}
+                                                                    </>
+                                                                )}
+
+                                                                {messageType === 'image' && messageViewUrl && (
+                                                                    <a href={messageViewUrl} target="_blank" rel="noopener noreferrer" className="mt-2 block">
                                                                         <img
-                                                                            src={message.viewUrl}
-                                                                            alt={message.fileName || 'image'}
-                                                                            className="mt-2 max-h-44 rounded-xl border border-slate-200/90 dark:border-slate-600 object-contain bg-white dark:bg-slate-800"
+                                                                            src={messageViewUrl}
+                                                                            alt={message?.fileName || 'image'}
+                                                                            className="max-h-44 rounded-xl border border-slate-200/90 object-contain bg-white dark:border-slate-600 dark:bg-slate-800 cursor-zoom-in"
                                                                         />
-                                                                    )}
+                                                                    </a>
+                                                                )}
 
-                                                                    {message.type === 'video' && message.viewUrl && (
-                                                                        <video className="mt-2 w-full max-h-48 rounded-xl border border-slate-200/90 dark:border-slate-600" controls src={message.viewUrl} />
-                                                                    )}
+                                                                {messageType === 'video' && messageViewUrl && (
+                                                                    <>
+                                                                        <video className="mt-2 w-full max-h-48 rounded-xl border border-slate-200/90 dark:border-slate-600" controls src={messageViewUrl} />
+                                                                        <a
+                                                                            href={messageViewUrl}
+                                                                            target="_blank"
+                                                                            rel="noopener noreferrer"
+                                                                            className="mt-2 inline-flex items-center rounded-md border border-slate-300/80 bg-white/90 px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-500/80 dark:bg-slate-900/60 dark:text-slate-200 dark:hover:bg-slate-800"
+                                                                        >
+                                                                            เปิดคลิป
+                                                                        </a>
+                                                                    </>
+                                                                )}
 
-                                                                    {message.type === 'audio' && message.viewUrl && (
-                                                                        <audio className="mt-2 w-full" controls src={message.viewUrl} />
-                                                                    )}
-                                                                </div>
+                                                                {messageType === 'audio' && messageViewUrl && (
+                                                                    <>
+                                                                        <audio className="mt-2 w-full" controls src={messageViewUrl} />
+                                                                        <a
+                                                                            href={messageViewUrl}
+                                                                            target="_blank"
+                                                                            rel="noopener noreferrer"
+                                                                            className="mt-2 inline-flex items-center rounded-md border border-slate-300/80 bg-white/90 px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-500/80 dark:bg-slate-900/60 dark:text-slate-200 dark:hover:bg-slate-800"
+                                                                        >
+                                                                            เปิดเสียง
+                                                                        </a>
+                                                                    </>
+                                                                )}
 
-                                                                {canReply && !isBotMessage && (
+                                                                {messageType === 'file' && messageViewUrl && (
+                                                                    <div className="mt-2 flex flex-wrap gap-1.5">
+                                                                        <a
+                                                                            href={messageViewUrl}
+                                                                            target="_blank"
+                                                                            rel="noopener noreferrer"
+                                                                            className="inline-flex items-center rounded-md border border-slate-300/80 bg-white/90 px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-500/80 dark:bg-slate-900/60 dark:text-slate-200 dark:hover:bg-slate-800"
+                                                                        >
+                                                                            เปิดไฟล์
+                                                                        </a>
+                                                                        <a
+                                                                            href={messageDownloadUrl || messageViewUrl}
+                                                                            target="_blank"
+                                                                            rel="noopener noreferrer"
+                                                                            className="inline-flex items-center rounded-md border border-emerald-300/80 bg-emerald-50/90 px-2 py-1 text-[11px] font-semibold text-emerald-700 hover:bg-emerald-100/90 dark:border-emerald-500/60 dark:bg-emerald-500/10 dark:text-emerald-300 dark:hover:bg-emerald-500/20"
+                                                                        >
+                                                                            ดาวน์โหลด
+                                                                        </a>
+                                                                    </div>
+                                                                )}
+                                                            </div>
+
+                                                            <div className="flex items-center gap-1">
+                                                                {canReply && (
                                                                     <button
                                                                         type="button"
                                                                         onClick={() => handleReplyToMessage(message)}
@@ -2442,79 +3049,77 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
                                                                         ...
                                                                     </button>
                                                                 )}
+                                                                <p className="text-[10px] font-medium text-slate-500 dark:text-slate-400">{messageTime}</p>
                                                             </div>
-
-                                                            <p className={`mt-1 text-[10px] font-medium text-slate-500 dark:text-slate-400 ${isBotMessage ? 'mr-1 text-right' : 'ml-1'}`}>
-                                                                {message.createdAtText}
-                                                            </p>
                                                         </div>
                                                     </div>
                                                 </div>
-                                            );
-                                        })}
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+
+                                <form
+                                    className="sticky bottom-0 px-3 py-2.5 border-t border-slate-200/70 dark:border-slate-700/80 bg-white/95 dark:bg-slate-900/95 backdrop-blur"
+                                    onSubmit={(event) => {
+                                        event.preventDefault();
+                                        handleSendGroupMessage();
+                                    }}
+                                >
+                                    {replyTarget && (
+                                        <div className="mb-2 rounded-xl border border-indigo-200/80 dark:border-indigo-500/30 bg-indigo-50/80 dark:bg-indigo-500/10 px-3 py-2">
+                                            <div className="flex items-center justify-between gap-2">
+                                                <p className="text-[11px] font-semibold text-indigo-700 dark:text-indigo-200">
+                                                    [ข้อความตอบกับ] {replyTarget.senderName || 'ข้อความก่อนหน้า'}
+                                                </p>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setReplyTarget(null)}
+                                                    className="w-5 h-5 rounded-full bg-indigo-100 dark:bg-indigo-500/20 text-indigo-600 dark:text-indigo-100 flex items-center justify-center hover:bg-indigo-200 dark:hover:bg-indigo-500/30"
+                                                    aria-label="ยกเลิกการตอบกลับ"
+                                                >
+                                                    <X size={11} />
+                                                </button>
+                                            </div>
+                                            <p className="mt-1 text-xs text-indigo-700/80 dark:text-indigo-100/90 break-words">{replyTarget.previewText || '-'}</p>
+                                        </div>
+                                    )}
+
+                                    <div className="flex items-center gap-2 rounded-2xl border border-slate-200/90 dark:border-slate-700 bg-slate-50/90 dark:bg-slate-800/90 px-2.5 py-1.5 shadow-sm">
+                                        <input
+                                            ref={lineSendModalInputRef}
+                                            type="text"
+                                            value={outgoingMessage}
+                                            onChange={(event) => setOutgoingMessage(event.target.value)}
+                                            placeholder="พิมพ์ข้อความ..."
+                                            className="flex-1 bg-transparent text-sm text-slate-800 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none"
+                                            disabled={!selectedGroup || sendingMessage}
+                                            maxLength={2000}
+                                        />
+
+                                        <button
+                                            type="submit"
+                                            disabled={!canSendGroupMessage}
+                                            className="w-9 h-9 rounded-full bg-gradient-to-br from-[#24387E] to-[#3F5BC7] text-white flex items-center justify-center hover:brightness-110 disabled:from-slate-300 disabled:to-slate-300 disabled:text-slate-500 disabled:cursor-not-allowed"
+                                            aria-label="ส่งข้อความ"
+                                        >
+                                            <Send size={14} />
+                                        </button>
                                     </div>
 
-                                    <form
-                                        className="sticky bottom-0 px-3 py-2.5 border-t border-slate-200/70 dark:border-slate-700/80 bg-white/95 dark:bg-slate-900/95 backdrop-blur"
-                                        onSubmit={(event) => {
-                                            event.preventDefault();
-                                            handleSendGroupMessage();
-                                        }}
-                                    >
-                                        {replyTarget && (
-                                            <div className="mb-2 rounded-xl border border-indigo-200/80 dark:border-indigo-500/30 bg-indigo-50/80 dark:bg-indigo-500/10 px-3 py-2">
-                                                <div className="flex items-center justify-between gap-2">
-                                                    <p className="text-[11px] font-semibold text-indigo-700 dark:text-indigo-200">
-                                                        [ข้อความตอบกับ] {replyTarget.senderName || 'ข้อความก่อนหน้า'}
-                                                    </p>
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => setReplyTarget(null)}
-                                                        className="w-5 h-5 rounded-full bg-indigo-100 dark:bg-indigo-500/20 text-indigo-600 dark:text-indigo-100 flex items-center justify-center hover:bg-indigo-200 dark:hover:bg-indigo-500/30"
-                                                        aria-label="ยกเลิกการตอบกลับ"
-                                                    >
-                                                        <X size={11} />
-                                                    </button>
-                                                </div>
-                                                <p className="mt-1 text-xs text-indigo-700/80 dark:text-indigo-100/90 break-words">{replyTarget.previewText || '-'}</p>
-                                            </div>
-                                        )}
-
-                                        <div className="flex items-center gap-2 rounded-2xl border border-slate-200/90 dark:border-slate-700 bg-slate-50/90 dark:bg-slate-800/90 px-2.5 py-1.5 shadow-sm">
-                                            <input
-                                                type="text"
-                                                value={outgoingMessage}
-                                                onChange={(event) => setOutgoingMessage(event.target.value)}
-                                                placeholder="พิมพ์ข้อความ..."
-                                                className="flex-1 bg-transparent text-sm text-slate-800 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none"
-                                                disabled={!selectedGroup || sendingMessage}
-                                                maxLength={2000}
-                                            />
-
-                                            <button
-                                                type="submit"
-                                                disabled={!canSendGroupMessage}
-                                                className="w-9 h-9 rounded-full bg-gradient-to-br from-[#24387E] to-[#3F5BC7] text-white flex items-center justify-center hover:brightness-110 disabled:from-slate-300 disabled:to-slate-300 disabled:text-slate-500 disabled:cursor-not-allowed"
-                                                aria-label="ส่งข้อความ"
-                                            >
-                                                <Send size={14} />
-                                            </button>
-                                        </div>
-
-                                        <p className="mt-1 px-2 text-[11px] text-slate-500 dark:text-slate-400">
-                                            {sendingMessage
-                                                ? 'กำลังส่งข้อความ...'
-                                                : (replyTarget
-                                                    ? 'กำลังตอบกลับข้อความในกลุ่ม LINE'
-                                                    : 'ส่งข้อความเข้ากลุ่ม LINE ได้จากช่องนี้')}
-                                        </p>
-                                    </form>
-                                </div>
-                            </section>
+                                    <p className="mt-1 px-2 text-[11px] text-slate-500 dark:text-slate-400">
+                                        {sendingMessage
+                                            ? 'กำลังส่งข้อความ...'
+                                            : (replyTarget
+                                                ? 'กำลังตอบกลับข้อความในกลุ่ม LINE'
+                                                : 'ส่งข้อความเข้ากลุ่ม LINE ได้จากช่องนี้')}
+                                    </p>
+                                </form>
+                            </div>
                         </div>
                     </div>
                 </div>
-            </div>
+            )}
 
             {taskPopups.length > 0 && (
                 <div className="fixed right-4 top-20 z-[80] w-[min(94vw,440px)] space-y-3">
@@ -2638,6 +3243,8 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
                     )}
                 </div>
             )}
+                </div>
+            </div>
         </div>
     );
 }

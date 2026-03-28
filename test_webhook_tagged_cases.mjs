@@ -171,6 +171,7 @@ async function run() {
     const groupId = `C${crypto.randomBytes(16).toString('hex')}`;
     const senderId = `U${crypto.randomBytes(16).toString('hex')}`;
     const assigneeId = `U${crypto.randomBytes(16).toString('hex')}`;
+    const secondaryAssigneeId = `U${crypto.randomBytes(16).toString('hex')}`;
 
     const now = Date.now();
     const cases = [
@@ -191,6 +192,71 @@ async function run() {
             name: 'tag+deadline',
             text: '@aina ส่งรายงานภายใน 20/03',
             mentions: []
+        },
+        {
+            name: 'mention-only+keyword',
+            text: '@crash สรุป nextstep ให้หน่อย',
+            mentions: [
+                { index: 0, length: 6, userId: assigneeId }
+            ]
+        },
+        {
+            name: 'all-only+keyword',
+            text: '@All สรุปประเด็นหารือและ Nextstep (05/03)',
+            mentions: [
+                { index: 0, length: 4, type: 'all' }
+            ]
+        },
+        {
+            name: 'mention+keyword+cc',
+            text: '@crash สรุปประเด็นหารือและ Nextstep (05/03) cc @auey @all',
+            mentions: [
+                { index: 0, length: 6, userId: assigneeId },
+                { index: 44, length: 5, userId: `U${crypto.randomBytes(16).toString('hex')}` }
+            ]
+        },
+        {
+            name: 'sample-risk-eval-deadline',
+            text: '@aina @พี่ปุย หารือ พี่ประพาท BT ประเมินให้หน่อย มี + ความดสี่ยง ที่ควบคุมได้ + ความเสี่ยงที่ควบคุมไม่ได้ ตรงไหนบ้าง ขอภายใน 17/03',
+            mentions: [
+                { userId: env.LINE_BOT_USER_ID },
+                { userId: assigneeId }
+            ]
+        },
+        {
+            name: 'sample-summary-cc-all',
+            text: '@aina @ประพาทBT ให้ไครสรุปใฟ้ผมหน่อยนะ cc@all',
+            mentions: [
+                { userId: env.LINE_BOT_USER_ID },
+                { userId: assigneeId },
+                { type: 'all' }
+            ]
+        },
+        {
+            name: 'sample-lead-meeting-cc-all',
+            text: '@aina @ประพาทBT lead ประชุม พร้อมขายใช่ไหม cc @all',
+            mentions: [
+                { userId: env.LINE_BOT_USER_ID },
+                { userId: assigneeId },
+                { type: 'all' }
+            ]
+        },
+        {
+            name: 'sample-nextstep-deadline-follow',
+            text: '@aina @aun นัดหมาย,nextstep เมื่อไหร่ครับ / แจ้งผมภายใน 24/02 @กล้วย ตามด้วย',
+            mentions: [
+                { userId: env.LINE_BOT_USER_ID },
+                { userId: assigneeId },
+                { userId: secondaryAssigneeId }
+            ]
+        },
+        {
+            name: 'sample-data-mgt-input',
+            text: '@aina data mgt team @พี่ปุย เตรียมอินput ประชุม',
+            mentions: [
+                { userId: env.LINE_BOT_USER_ID },
+                { userId: assigneeId }
+            ]
         }
     ];
 
@@ -260,7 +326,7 @@ async function run() {
             });
         }
     } finally {
-        const idsForCleanup = [senderId, assigneeId, env.LINE_BOT_USER_ID];
+        const idsForCleanup = [senderId, assigneeId, secondaryAssigneeId, env.LINE_BOT_USER_ID];
 
         cleanupPaths.add(`projects/${groupId}`);
 
@@ -280,7 +346,15 @@ async function run() {
     const expected = {
         'tag-only': false,
         'tag+mention': true,
-        'tag+deadline': true
+        'tag+deadline': true,
+        'mention-only+keyword': true,
+        'all-only+keyword': true,
+        'mention+keyword+cc': true,
+        'sample-risk-eval-deadline': true,
+        'sample-summary-cc-all': true,
+        'sample-lead-meeting-cc-all': true,
+        'sample-nextstep-deadline-follow': true,
+        'sample-data-mgt-input': true
     };
 
     const tableRows = results.map((row) => ({

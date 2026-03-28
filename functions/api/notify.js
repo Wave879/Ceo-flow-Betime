@@ -421,6 +421,14 @@ export async function onRequest({ request, env }) {
         const url = new URL(request.url);
         const force = url.searchParams.get('force') === '1';
         const secret = url.searchParams.get('secret');
+        const hasSecret = !!env.NOTIFY_CRON_SECRET;
+
+        if (hasSecret && secret !== env.NOTIFY_CRON_SECRET) {
+            return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+                status: 401,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
 
         if (request.method === 'POST') {
             let body = {};
@@ -441,14 +449,6 @@ export async function onRequest({ request, env }) {
                 }, env);
                 return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } });
             }
-        }
-
-        const hasSecret = !!env.NOTIFY_CRON_SECRET;
-        if (hasSecret && secret !== env.NOTIFY_CRON_SECRET) {
-            return new Response(JSON.stringify({ error: 'Unauthorized' }), {
-                status: 401,
-                headers: { 'Content-Type': 'application/json' }
-            });
         }
 
         const summary = await runDeadlineNotifications(env, { force });

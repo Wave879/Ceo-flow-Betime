@@ -1,6 +1,6 @@
-# สถาปัตยกรรมระบบ - TeamFlow Pro
+# สถาปัตยกรรมระบบ - CEO Flow
 
-> อัปเดตล่าสุด: 9 มีนาคม 2026
+> อัปเดตล่าสุด: 23 มีนาคม 2026
 
 ---
 
@@ -12,9 +12,11 @@
 |                                                                                   |
 |  React + Vite + Tailwind                                                          |
 |  - โครงหลักของแอป + เมนูด้านบน                                                   |
-|  - หน้า Overview                                                                  |
+|  - หน้า Overview (CEO Decision Queue + delete task)                               |
+|  - หน้า Projects (LINE Group list + rename + task list)                           |
 |  - หน้า Portfolio                                                                 |
-|  - Task Detail Modal (Details | Timeline | Attachments)                          |
+|  - หน้า Staff                                                                     |
+|  - Task Detail Modal (Details | Timeline | Attachments | Chat Panel)              |
 |  - Firestore Hook (รองรับ Firebase/Local fallback)                               |
 |                                                                                   |
 |            HTTPS /api/webhook                         HTTPS /api/notify           |
@@ -25,11 +27,15 @@
 |                       Cloudflare Functions (Serverless API)                       |
 |                                                                                   |
 |  functions/api/webhook.js                                                         |
-|  - รับ LINE webhook                                                                |
-|  - flow ลงทะเบียน (lineUsers <-> employees)                                        |
+|  - รับ LINE webhook (HMAC-SHA256 signature verify)                                |
+|  - dedup ด้วย KV (gันข้อความซ้ำ)                                                  |
+|  - /test — health check                                                           |
+|  - /สั่ง — force-create task (fast path, 0 AI)                                   |
+|  - /แจ้งงาน — Flex Message สรุปงานทั้งหมดในกลุ่ม                                 |
+|  - /แจ้งเตือนส่วนตัว — push งานของ user นั้นไปยัง DM ส่วนตัว                     |
+|  - auto meeting-summary task parser                                               |
+|  - AI เลขา (chat session / Azure OpenAI)                                          |
 |  - flow อัปเดตสถานะงาน                                                             |
-|  - flow "สั่งงาน" เฉพาะแอดมิน (taskCreateSessions)                                   |
-|  - AI เลขา (chat session)                                                         |
 |                                                                                   |
 |  functions/api/notify.js                                                          |
 |  - ระบบเตือนงานตามกำหนด (D-3 / D-1 / D-DAY)                                        |
@@ -43,8 +49,13 @@
 | Firestore REST API           |                 | บริการภายนอก                      |
 | Collections หลัก:            |                 | - LINE Messaging API              |
 | - employees                  |                 | - Azure OpenAI (Soundwave)        |
-| - lineUsers                  |                 +----------------------------------+
-| - tasks                      |
+| - lineUsers                  |                 | - Cloudflare KV (dedup/state)     |
+| - tasks                      |                 +----------------------------------+
+| - projects                   |
+| - projects/{id}/messages     |
+| - projects/{id}/members      |
+| - groupUsers                 |
+| - groupMemberLinks           |
 | - positions                  |
 | - taskSessions               |
 | - taskCreateSessions         |
@@ -62,9 +73,11 @@
 | องค์ประกอบ | หน้าที่ |
 |---|---|
 | `src/App.jsx` | โครงหน้าเว็บหลัก, เมนูสลับหน้า, ธีม |
-| `src/pages/OverviewPage.jsx` | ภาพรวมระบบ, รายการงาน, ปุ่ม action หลัก |
+| `src/pages/OverviewPage.jsx` | ภาพรวมระบบ, CEO Decision Queue (+ ปุ่มลบ task), กราฟสถิติ |
+| `src/pages/ProjectsPage.jsx` | รายการ LINE Group, รายการ task ต่อกลุ่ม, ตั้งชื่อกลุ่ม (rename), แชทในกลุ่ม |
 | `src/pages/PortfolioPage.jsx` | ภาพรวมทีมและงานรายบุคคล |
-| `src/components/TaskDetailModal.jsx` | รายละเอียดงาน, Timeline, แนบไฟล์, เปลี่ยนสถานะ |
+| `src/pages/StaffPage.jsx` | รายชื่อพนักงาน |
+| `src/components/TaskDetailModal.jsx` | รายละเอียดงาน, Timeline, แนบไฟล์, เปลี่ยนสถานะ, **Chat Panel (ขวา)** |
 | `src/hooks/useFirestore.js` | อ่าน/เขียนข้อมูล (Firebase + fallback), เรียก `/api/notify` ตาม flow |
 | `src/hooks/useTheme.jsx` | จัดการโหมดสีและการจำค่า |
 
@@ -72,7 +85,7 @@
 
 | ไฟล์ | หน้าที่ |
 |---|---|
-| `webhook.js` | สมองหลักของบอท LINE: ลงทะเบียน, คำสั่งงาน, session, AI, role check |
+| `webhook.js` | สมองหลักของบอท LINE: ลงทะเบียน, คำสั่งงาน, session, AI, role check, /สั่ง, /แจ้งงาน, /แจ้งเตือนส่วนตัว |
 | `notify.js` | เตือนงานอัตโนมัติและประกาศงานผ่าน LINE |
 
 ---
@@ -150,6 +163,37 @@ cron/manual trigger -> notify.js
   -> หมดเวลา session อัตโนมัติเมื่อไม่ใช้งานนาน
 ```
 
+### 7) สรุปงานกลุ่ม (`/แจ้งงาน`)
+
+```text
+สมาชิกพิมพ์ "/แจ้งงาน" ในกลุ่ม LINE
+  -> webhook query tasks collection filter projectId = groupId
+  -> อ่านชื่อกลุ่มจาก projects doc (name > webProjectName > groupName)
+  -> build LINE Flex Message (header สีน้ำเงิน + task list + footer ปุ่ม)
+  -> replyFlex ในกลุ่ม
+  -> footer มีปุ่ม "🔔 แจ้งเตือนส่วนตัว"
+```
+
+### 8) แจ้งเตือนส่วนตัว (`/แจ้งเตือนส่วนตัว`)
+
+```text
+สมาชิกกดปุ่ม "🔔 แจ้งเตือนส่วนตัว" ใน Flex / พิมพ์ command
+  -> webhook ตอบในกลุ่มว่า "ส่งรายการงานไปยัง chat ส่วนตัวแล้ว"
+  -> query tasks ที่ lineAssigneeIds ARRAY_CONTAINS userId (+ filter groupId ถ้าอยู่ในกลุ่ม)
+  -> pushText ไปยัง LINE DM ของ user (ต้อง add บอทเป็นเพื่อนก่อน)
+  -> ถ้า push ไม่ได้ (user ยังไม่ add บอท) = silent fail
+```
+
+### 9) ตั้งชื่อกลุ่ม (Web UI)
+
+```text
+หน้า Projects > เลือกกลุ่ม > คลิกไอคอนดินสอ ✏️ ข้างชื่อกลุ่ม
+  -> ช่อง input inline + ปุ่ม ✓ / ✕
+  -> บันทึก updateDoc(projects/{groupId}, { name })
+  -> อัปเดต state UI ทันที
+  -> บอทจะอ่านชื่อนี้ใน /แจ้งงาน ครั้งถัดไป
+```
+
 ---
 
 ## โครงสร้างข้อมูล (Data Model)
@@ -157,40 +201,56 @@ cron/manual trigger -> notify.js
 ### `employees`
 - `_id` (doc id)
 - `id` (รหัสพนักงานเชิงธุรกิจ)
-- `fullName`
-- `name`
-- `position`
-- `role` (`admin` | `employees`)
+- `fullName`, `name`
+- `position`, `role` (`admin` | `employees`)
 - profile: `avatar`, `bio`, `color`
 
 ### `lineUsers`
-- `lineUserId`
-- `employeeId`
-- `employeeDocId`
-- `employeeName`
-- `nickname`
-- `linkedAt`
+- `lineUserId`, `employeeId`, `employeeDocId`
+- `employeeName`, `nickname`, `linkedAt`
 
 ### `tasks`
-- `id`
-- `name`
-- `assignees` (array)
-- `deadline`
+- `id`, `name`, `title`
+- `projectId` — LINE group ID ที่งานนี้สังกัด
+- `assignees[]` (employee IDs), `assignee` (ชื่อหลัก)
+- `lineAssigneeIds[]`, `lineAssigneeNames[]`
+- `deadline`, `deadlineText`
 - `type` (`team` | `individual`)
-- `status` (`pending` | `in-progress` | `completed`)
-- `description`
-- `lastUpdate`
-- `lastUpdatedAt`
-- `lastUpdatedBy`
-- `createdAt`, `createdBy`, `createdByName`
-- `updatedAt`, `updatedBy`
-- optional: `completedAt`, `attachments[]`
+- `status` (`pending` | `in-progress` | `completed` | `abandoned`)
+- `source` (`line-meeting-summary` | `line-tagged-task` | `manual`)
+- `lineMessageId`, `lineContextMessageIds[]`
+- `createdAt`, `createdBy`, `createdByName`, `updatedAt`
+- optional: `completedAt`, `attachments[]`, `lastUpdate`, `lastUpdatedAt`
+
+### `projects`
+- `id` — LINE group ID
+- `name` — ชื่อที่ตั้งเองจาก web UI (ใช้ใน /แจ้งงาน)
+- `groupName`, `webProjectName` — ชื่อ fallback
+- `pictureUrl`, `memberCount`, `groupType`
+- `source`, `updatedAt`
+
+### `projects/{groupId}/messages`
+- บันทึกข้อความแชทในกลุ่ม (ทั้ง user และ bot)
+- `lineUserId`, `senderRole` (`bot` | `user`)
+- `text`, `type`, `createdAt`
+
+### `projects/{groupId}/members`
+- สมาชิกในกลุ่มนั้น
+
+### `groupUsers`
+- `userId` (LINE user ID)
+- `displayName`, `projectGroup`, `source`
+- `firstSeen`, `lastSeen`
+
+### `groupMemberLinks`
+- เชื่อม group <-> LINE user
+- `groupId`, `lineUserId`, `displayName`
 
 ### คอลเลกชัน session/log
-- `taskSessions` (session ของคำสั่งสถานะงาน)
-- `taskCreateSessions` (session ของคำสั่งสั่งงาน)
-- `chatSessions` (session คุยกับ AI)
-- `notificationLogs` (กันส่งเตือนซ้ำ + audit)
+- `taskSessions` — session อัปเดตสถานะ
+- `taskCreateSessions` — session สั่งงาน (admin)
+- `chatSessions` — session ถามเลขา (AI)
+- `notificationLogs` — กันส่งเตือนซ้ำ + audit
 
 ---
 
@@ -227,30 +287,41 @@ active -> รับข้อความ -> เรียก AI -> บันท�
 | ลงทะเบียน LINE | Yes | Yes |
 | `เช็คงาน` | Yes | Yes |
 | `สถานะ` (อัปเดตงานของตัวเอง) | Yes | Yes |
-| `สั่งงาน` (สร้างงานใหม่จากบอท) | Yes | No |
-| ลบงานผ่านบอท | แผนถัดไป | แผนถัดไป |
+| `/สั่ง` (สร้างงานด่วนจาก LINE) | Yes | Yes |
+| `/แจ้งงาน` (ดูงานทั้งหมดในกลุ่ม) | Yes | Yes |
+| `/แจ้งเตือนส่วนตัว` (push งานตัวเองไป DM) | Yes | Yes |
+| `สั่งงาน` session (สร้างงานแบบ guided) | Yes | No |
+| ลบ task บน CEO Flow web | Yes | Yes |
+| ตั้งชื่อกลุ่ม (rename) บน web | Yes | Yes |
 
 แหล่งตรวจสิทธิ์:
-- map LINE user -> `lineUsers`
-- map ไป employee -> `employees`
-- ตรวจค่า `employees.role`
+- map LINE user → `lineUsers` → `employees.role`
+
+---
+
+## สถาปัตยกรรม Chat Panel
+
+`TaskDetailModal` มี 2 column เรียงแนวนอน:
+- **ซ้าย** (`flex-1`): รายละเอียดงาน, Tabs, Footer action
+- **ขวา** (`w-72 xl:w-80`): `TaskChatPanel` — แสดง real-time chat จาก `projects/{projectId}/messages`
+
+Chat Panel:
+- subscribe `onSnapshot` บน subcollection `messages` (orderBy createdAt asc ใน JS)
+- bubble สีเขียว (`#9FE870`) = bot, bubble ขาว/dark = user
+- แสดง avatar ตัวอักษรย่อ และชื่อผู้ส่ง
 
 ---
 
 ## สถาปัตยกรรม Timeline
 
 ปัจจุบันใน `TaskDetailModal` สร้าง timeline จาก field ที่มีใน task:
-- `createdAt/startDate` -> เหตุการณ์เริ่ม/สั่งงาน
-- `updatedAt` -> เหตุการณ์แก้ไขข้อมูล
-- `lastUpdatedAt + lastUpdate` -> เหตุการณ์อัปเดตความคืบหน้า
-- `completedAt/status=completed` -> เหตุการณ์สิ้นสุดงาน
-- `attachments[].addedAt` ล่าสุด -> เหตุการณ์แนบไฟล์
+- `createdAt/startDate` → เหตุการณ์เริ่ม/สั่งงาน
+- `updatedAt` → เหตุการณ์แก้ไขข้อมูล
+- `lastUpdatedAt + lastUpdate` → เหตุการณ์อัปเดตความคืบหน้า
+- `completedAt/status=completed` → เหตุการณ์สิ้นสุดงาน
+- `attachments[].addedAt` ล่าสุด → เหตุการณ์แนบไฟล์
 
-ค่า fallback:
-- ถ้าไม่พบผู้กระทำ/เวลา ใช้ค่าพื้นฐานเพื่อไม่ให้ timeline ว่าง
-
-แผนถัดไป:
-- ย้ายไปใช้ event log จริงที่ `tasks/{taskId}/timeline/{eventId}`
+แผนถัดไป: ย้ายไปใช้ event log จริงที่ `tasks/{taskId}/timeline/{eventId}`
 
 ---
 
@@ -258,66 +329,77 @@ active -> รับข้อความ -> เรียก AI -> บันท�
 
 ### อินพุตจาก LINE Webhook
 - รับ event ประเภทข้อความ (`event.type=message`, `message.type=text`)
-- ใช้ `source.userId`, `replyToken`
+- ใช้ `source.userId`, `source.groupId`, `replyToken`
+- verify HMAC-SHA256 signature (`x-line-signature`)
+- dedup ด้วย Cloudflare KV (`msg_dedup_v1:{messageId}`)
 
 ### เอาต์พุตไป LINE
-- ข้อความ text
-- Flex message (กล่องเดียว)
-- ปุ่ม action เช่น เปิดเว็บ/ส่งคำสั่ง `สถานะ`
+- `replyText` — ข้อความ text ธรรมดา
+- `replyFlex` — LINE Flex Message (Bubble)
+- `pushText` — push ไปยัง user DM (ต้อง add บอทเป็นเพื่อน)
+
+### คำสั่ง LINE ที่รองรับ
+
+| Command | สถานที่ | หน้าที่ |
+|---|---|---|
+| `/test` | กลุ่ม | health check |
+| `/สั่ง <ชื่องาน>` | กลุ่ม | สร้าง task ทันที (fast path) |
+| `/แจ้งงาน` | กลุ่ม | Flex Message สรุปงานทั้งหมดในกลุ่ม |
+| `/แจ้งเตือนส่วนตัว` | กลุ่ม/DM | push งานของคนกดไปยัง DM |
+| `ถามเลขา ...` | กลุ่ม/DM | AI secretary chat session |
+| `จบถามเลขา` | กลุ่ม/DM | ปิด AI session |
+| `เชื่อมต่อระบบ` | กลุ่ม | ลงทะเบียนกลุ่ม |
+| `/มีชีวิต` / `/จบชีวิต` | กลุ่ม | เปิด/ปิด alive mode |
 
 ### Azure OpenAI
 - Primary: Responses API
 - Fallback: Chat Completions API
-- Env ที่ใช้:
-  - `AZURE_OPENAI_ENDPOINT`
-  - `AZURE_OPENAI_API_KEY`
-  - `AZURE_OPENAI_DEPLOYMENT`
-  - `AZURE_OPENAI_API_VERSION`
+- Env: `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_DEPLOYMENT`, `AZURE_OPENAI_API_VERSION`
 
 ---
 
 ## ความเสถียรและความปลอดภัย
 
 ### ที่มีอยู่แล้ว
+- verify HMAC-SHA256 signature LINE webhook ทุก request
+- dedup event ด้วย Cloudflare KV (กัน race condition / replay)
 - กันแจ้งเตือนซ้ำด้วย `notificationLogs`
-- ตั้ง timeout + ลบ session อัตโนมัติ
-- ตรวจสิทธิ์ role สำหรับคำสั่ง admin-only
-- มี fallback เมื่อข้อมูลผูกบัญชีไม่ครบ
+- timeout + ลบ session อัตโนมัติ
+- Firestore query ใช้ single-field index (ไม่ต้อง composite) เพื่อความเสถียร
+- error fallback: ถ้า Flex ส่งไม่สำเร็จ → fallback เป็น plain text
 
 ### ที่ควรเพิ่ม
-- idempotency token ใน flow สร้างงาน
-- validation เชิงลึกของ deadline/assignee/type
 - audit log สำหรับทุกการเปลี่ยนแปลงงาน
 - retry policy เมื่อ external API ล้มเหลว
+- validation เชิงลึกของ deadline/assignee/type
 
 ---
 
 ## โครงสร้างการ Deploy
 
 ```text
-Cloudflare Pages (Frontend)
-  + Cloudflare Functions (API)
-      - /api/webhook
-      - /api/notify
+Cloudflare Pages (Frontend: React + Vite)
+  + Cloudflare Functions (API: webhook, notify)
+      - /api/webhook  ← LINE Messaging API
+      - /api/notify   ← cron / manual trigger
+  + Cloudflare KV     ← dedup, state, known groups
 
 External:
-  - Firestore REST
+  - Firebase Firestore REST API
   - LINE Messaging API
   - Azure OpenAI
 ```
 
----
-
 ## Environment Variables
 
 ### จำเป็น
-- `LINE_TOKEN`
-- `AZURE_OPENAI_ENDPOINT`
-- `AZURE_OPENAI_API_KEY`
-- `AZURE_OPENAI_DEPLOYMENT`
+- `LINE_TOKEN` — LINE Channel Access Token
+- `LINE_CHANNEL_SECRET` — สำหรับ verify webhook signature
+- `FIREBASE_PROJECT_ID` — Firestore project
+- `FIREBASE_API_KEY` — Firestore Web API key
 
 ### ทางเลือก
-- `AZURE_OPENAI_API_VERSION`
+- `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_DEPLOYMENT`, `AZURE_OPENAI_API_VERSION`
 - `NOTIFY_CRON_SECRET`
 - `WEB_APP_URL` / `APP_URL`
 - `BRAND_IMAGE_URL` / `FLEX_BRAND_IMAGE_URL`
@@ -326,8 +408,7 @@ External:
 
 ## ช่องว่างปัจจุบัน / งานต่อไป
 
-1. ปรับ encoding ของข้อความไทย legacy บางส่วนใน backend
-2. ย้าย Timeline จากการ infer field ไป event log จริง
-3. เพิ่มคำสั่ง admin CRUD ครบชุด (แก้/ลบ/มอบหมายใหม่)
-4. เพิ่ม integration test สำหรับ session flow สำคัญ
-5. เพิ่ม observability (structured logs + metrics)
+1. Push `/แจ้งเตือนส่วนตัว` ทำงานได้เฉพาะ user ที่ add บอทเป็นเพื่อนแล้ว (LINE policy)
+2. ย้าย Timeline จากการ infer field ไป event log จริง (`tasks/{id}/timeline/`)
+3. เพิ่ม composite Firestore index สำหรับ query ที่ต้อง filter + sort พร้อมกัน
+4. เพิ่ม observability (structured logs + metrics)

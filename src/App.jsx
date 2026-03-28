@@ -1,4 +1,4 @@
-﻿import React, { useState } from 'react';
+import React, { useState } from 'react';
 import { BarChart3, Users, Sun, Moon, HardDrive, Cloud, Layers, FolderKanban, UserCircle } from 'lucide-react';
 import { useFirestore } from './hooks/useFirestore';
 import { useTheme } from './hooks/useTheme';
@@ -19,7 +19,7 @@ export default function App() {
     const [page, setPage] = useState('overview');
     const {
         tasks = [], employees = [], positions = [], projects = [], loading,
-        addTask, updateTask,
+        addTask, updateTask, deleteTask,
         addEmployee, updateEmployee, deleteEmployee,
         addPosition, deletePosition,
         isLocal,
@@ -30,7 +30,7 @@ export default function App() {
     if (loading) return <LoadingSpinner />;
 
     return (
-        <div className="min-h-screen bg-slate-50 dark:bg-[#0a0f1e] transition-colors duration-300">
+        <div className="senior-readable min-h-screen bg-slate-50 dark:bg-[#0a0f1e] transition-colors duration-300">
             <nav
                 className="sticky top-0 z-40 border-b border-slate-200/60 dark:border-white/[0.04] transition-colors duration-300"
                 style={{
@@ -120,11 +120,13 @@ export default function App() {
                         projects={projects}
                         onAddTask={addTask}
                         onUpdateTask={updateTask}
+                        onDeleteTask={deleteTask}
                         onAddEmployee={addEmployee}
                         onDeleteEmployee={deleteEmployee}
                         onAddPosition={addPosition}
                         onDeletePosition={deletePosition}
                         onNavigate={setPage}
+                        isLocal={isLocal}
                     />
                 ) : page === 'projects' ? (
                     <ProjectsPage
@@ -132,6 +134,7 @@ export default function App() {
                         employees={employees}
                         projects={projects}
                         onUpdateTask={updateTask}
+                        onDeleteTask={deleteTask}
                     />
                 ) : page === 'staff' ? (
                     <StaffPage
@@ -146,6 +149,7 @@ export default function App() {
                         onDeleteEmployee={deleteEmployee}
                         onUpdateEmployee={updateEmployee}
                         onUpdateTask={updateTask}
+                        onDeleteTask={deleteTask}
                     />
                 ) : (
                     <div className="text-center py-20">

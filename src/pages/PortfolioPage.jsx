@@ -87,7 +87,7 @@ function FolderCard({ task, assignees, onClick }) {
     );
 }
 
-export default function PortfolioPage({ tasks, employees, positions, onDeleteEmployee, onUpdateEmployee, onUpdateTask }) {
+export default function PortfolioPage({ tasks, employees, positions, onDeleteEmployee, onUpdateEmployee, onUpdateTask, onDeleteTask }) {
     const [selectedEmpId, setSelectedEmpId] = useState(employees[0]?.id || null);
     const [filter, setFilter] = useState('all');
     const [selectedTask, setSelectedTask] = useState(null);
@@ -162,6 +162,35 @@ export default function PortfolioPage({ tasks, employees, positions, onDeleteEmp
         event.target.value = '';
     };
 
+    const handleDeleteTask = async (task) => {
+        const taskId = String(task?.id || '').trim();
+        if (!taskId) {
+            return;
+        }
+
+        if (typeof onDeleteTask !== 'function') {
+            alert('ยังไม่สามารถลบงานได้ในตอนนี้');
+            return;
+        }
+
+        const taskTitle = String(task?.name || task?.title || 'งานไม่ระบุชื่อ').trim();
+        const confirmed = window.confirm(`ต้องการลบงาน "${taskTitle}" ใช่หรือไม่?`);
+        if (!confirmed) {
+            return;
+        }
+
+        try {
+            await onDeleteTask(taskId);
+            setSelectedTask((current) => {
+                const currentId = String(current?.id || '').trim();
+                return currentId === taskId ? null : current;
+            });
+        } catch (err) {
+            console.error('Delete task failed:', err);
+            alert(`ลบงานไม่สำเร็จ: ${err?.message || 'Unknown error'}`);
+        }
+    };
+
     return (
         <div className="flex flex-col xl:flex-row xl:h-[calc(100vh-100px)] animate-fade-in gap-4 xl:gap-0">
             {selectedTask && (
@@ -169,6 +198,7 @@ export default function PortfolioPage({ tasks, employees, positions, onDeleteEmp
                     task={selectedTask}
                     employees={employees}
                     onClose={() => setSelectedTask(null)}
+                    onDelete={handleDeleteTask}
                     onUpdate={(id, data) => {
                         onUpdateTask?.(id, data);
                         setSelectedTask((current) => ({ ...current, ...data }));

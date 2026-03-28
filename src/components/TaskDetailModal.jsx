@@ -3,11 +3,59 @@ import { createPortal } from 'react-dom';
 import {
     X, Paperclip, Link2, Mic, Video, Trash2, Download,
     Calendar, Users, User, Clock,
-    ExternalLink, Play, Pause, FileText, Image, Plus, Archive, RotateCcw
+    ExternalLink, Play, Pause, FileText, Image, Plus, Archive, RotateCcw,
+    MessageCircle
 } from 'lucide-react';
 import { Avatar, StatusBadge, formatDate } from './UI';
-import { storage } from '../firebase';
+import { storage, db } from '../firebase';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { collection, query, onSnapshot } from 'firebase/firestore';
+
+const URL_REGEX = /(?:https?:\/\/|www\.)[^\s<>"']+/giu;
+function renderChatText(text = '') {
+    const source = String(text || '');
+    if (!source) return '';
+    URL_REGEX.lastIndex = 0;
+    const chunks = [];
+    let cursor = 0;
+    let match = URL_REGEX.exec(source);
+    while (match) {
+        const start = Number(match.index);
+        if (start > cursor) chunks.push(source.slice(cursor, start));
+        const url = String(match[0] || '');
+        const href = url.startsWith('http') ? url : `https://${url}`;
+        chunks.push(<a key={start} href={href} target="_blank" rel="noopener noreferrer" className="underline text-blue-600 dark:text-blue-400 break-all">{url}</a>);
+        cursor = start + url.length;
+        match = URL_REGEX.exec(source);
+    }
+    if (cursor < source.length) chunks.push(source.slice(cursor));
+    return chunks;
+}
+
+function formatClock(createdAt) {
+    if (!createdAt) return '';
+    const ts = createdAt?.seconds ? createdAt.seconds * 1000 : (createdAt?.toDate ? createdAt.toDate().getTime() : new Date(createdAt).getTime());
+    if (!Number.isFinite(ts)) return '';
+    return new Intl.DateTimeFormat('th-TH', { hour: '2-digit', minute: '2-digit' }).format(new Date(ts));
+}
+
+function toMillis(createdAt) {
+    if (!createdAt) return 0;
+    if (createdAt?.seconds) return createdAt.seconds * 1000;
+    if (createdAt?.toDate) return createdAt.toDate().getTime();
+    const parsed = new Date(createdAt).getTime();
+    return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function formatChatDay(createdAt) {
+    const ts = toMillis(createdAt);
+    if (!ts) return '';
+    return new Intl.DateTimeFormat('th-TH', {
+        weekday: 'short',
+        day: '2-digit',
+        month: '2-digit'
+    }).format(new Date(ts));
+}
 
 function normalizeMeetingSummaryTitleForDisplay(task = {}) {
     const fallbackTitle = String(task?.name || task?.title || '').trim();
@@ -193,8 +241,172 @@ function AttachmentItem({ att, onDelete }) {
     );
 }
 
+// Minimal chat panel — loads messages for the task's project group
+function TaskChatPanel({ projectId, focusMessageId = '' }) {
+    const [messages, setMessages] = useState([]);
+    const [loading, setLoading] = useState(true);
+    const scrollRef = useRef(null);
+    const messageRefs = useRef(new Map());
+    const [highlightedMessageId, setHighlightedMessageId] = useState('');
+
+    useEffect(() => {
+        const gid = String(projectId || '').trim();
+        if (!gid || !db) { setMessages([]); setLoading(false); return; }
+        setLoading(true);
+        // Avoid server-side ordering here because older docs may miss createdAt and get excluded.
+        const q = query(collection(db, 'projects', gid, 'messages'));
+        const unsub = onSnapshot(q, (snap) => {
+            const rows = (snap.docs || []).map((d) => {
+                const r = d.data() || {};
+                const isBot = String(r.senderRole || '').toLowerCase() === 'bot'
+                    || String(r.lineUserId || '') === '__bot__'
+                    || String(r.lineUserId || '') === 'bot';
+                const lineMessageId = String(r.lineMessageId || '').trim();
+                const createdAt = r.createdAt || r.sentAt || r.timestamp || r.updatedAt || null;
+                return {
+                    id: d.id,
+                    isBot,
+                    lineUserId: String(r.lineUserId || '').trim(),
+                    lineMessageId,
+                    type: String(r.type || r.messageType || 'text').toLowerCase(),
+                    text: String(r.text || r.previewText || r.message || r.messageText || r.body || '').trim(),
+                    senderName: String(r.senderName || r.senderDisplayName || r.displayName || '').trim(),
+                    createdAt
+                };
+            });
+            rows.sort((a, b) => {
+                return toMillis(a.createdAt) - toMillis(b.createdAt);
+            });
+            setMessages(rows);
+            setLoading(false);
+        }, (err) => {
+            console.error('TaskChatPanel subscribe failed:', err);
+            setLoading(false);
+        });
+        return () => unsub();
+    }, [projectId]);
+
+    useEffect(() => {
+        if (scrollRef.current) requestAnimationFrame(() => { scrollRef.current.scrollTop = scrollRef.current.scrollHeight; });
+    }, [messages.length]);
+
+    useEffect(() => {
+        const targetLineMessageId = String(focusMessageId || '').trim();
+        if (!targetLineMessageId || messages.length === 0) {
+            return;
+        }
+
+        const found = messages.find((msg) => String(msg.lineMessageId || '').trim() === targetLineMessageId);
+        if (!found) {
+            return;
+        }
+
+        const domTarget = messageRefs.current.get(found.id);
+        if (!domTarget) {
+            return;
+        }
+
+        domTarget.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        setHighlightedMessageId(found.id);
+
+        const clearTimer = setTimeout(() => {
+            setHighlightedMessageId((current) => (current === found.id ? '' : current));
+        }, 1800);
+
+        return () => clearTimeout(clearTimer);
+    }, [focusMessageId, messages]);
+
+    return (
+        <div className="flex flex-col h-full border-l border-slate-100 dark:border-white/10">
+            {/* Chat header */}
+            <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-100 dark:border-white/10 flex-shrink-0">
+                <MessageCircle size={14} className="text-indigo-500" />
+                <span className="text-xs font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wider">แชทกลุ่ม</span>
+            </div>
+            {/* Messages */}
+            <div
+                ref={scrollRef}
+                className="flex-1 overflow-y-auto custom-scroll p-4 bg-gradient-to-b from-slate-50/70 to-white dark:from-slate-900/70 dark:to-slate-900"
+                style={{ minHeight: 0 }}
+            >
+                {loading ? (
+                    <p className="text-xs text-center text-slate-400 pt-6">กำลังโหลด...</p>
+                ) : messages.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center h-full text-slate-400">
+                        <MessageCircle size={28} className="mb-2 opacity-30" />
+                        <p className="text-xs">ยังไม่มีข้อความ</p>
+                    </div>
+                ) : messages.map((msg, idx) => {
+                    const prev = idx > 0 ? messages[idx - 1] : null;
+                    const prevId = prev ? (String(prev.lineUserId || '') || (prev.isBot ? '__bot__' : prev.senderName)) : '';
+                    const curId = String(msg.lineUserId || '') || (msg.isBot ? '__bot__' : msg.senderName);
+                    const sameCluster = Boolean(prev) && Boolean(prev.isBot) === msg.isBot && prevId === curId;
+                    const showDateDivider = !prev || formatChatDay(prev.createdAt) !== formatChatDay(msg.createdAt);
+
+                    return (
+                        <React.Fragment key={msg.id}>
+                            {showDateDivider && (
+                                <div className="my-3 flex items-center gap-2">
+                                    <div className="h-px flex-1 bg-slate-200/80 dark:bg-slate-700/70" />
+                                    <span className="rounded-full bg-white/90 dark:bg-slate-800 px-2.5 py-0.5 text-[10px] font-semibold text-slate-500 dark:text-slate-300 border border-slate-200/80 dark:border-slate-700/70">
+                                        {formatChatDay(msg.createdAt)}
+                                    </span>
+                                    <div className="h-px flex-1 bg-slate-200/80 dark:bg-slate-700/70" />
+                                </div>
+                            )}
+
+                            <div
+                                ref={(node) => {
+                                    if (node) {
+                                        messageRefs.current.set(msg.id, node);
+                                    } else {
+                                        messageRefs.current.delete(msg.id);
+                                    }
+                                }}
+                                className={`rounded-2xl px-1 transition-all duration-300 ${
+                                    highlightedMessageId === msg.id
+                                        ? 'ring-2 ring-indigo-300/70 dark:ring-indigo-500/60 bg-indigo-50/40 dark:bg-indigo-500/10'
+                                        : ''
+                                }`}
+                            >
+                            <div className={`flex ${msg.isBot ? 'justify-end' : 'justify-start'} ${sameCluster ? 'mt-1' : 'mt-3'}`}>
+                                <div className={`flex max-w-[92%] md:max-w-[84%] items-end gap-2 ${msg.isBot ? 'flex-row-reverse' : 'flex-row'}`}>
+                                    {!msg.isBot && (
+                                        sameCluster
+                                            ? <div className="w-7 shrink-0" />
+                                            : <div className="w-7 h-7 rounded-full bg-gradient-to-br from-[#24387E] to-[#3F5BC7] text-white text-[10px] font-bold flex items-center justify-center shrink-0">{(msg.senderName || '?').slice(0, 1).toUpperCase()}</div>
+                                    )}
+                                    <div className={`flex flex-col ${msg.isBot ? 'items-end' : 'items-start'}`}>
+                                        {!sameCluster && (
+                                            <p className="mb-1 px-1 text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                                                {msg.isBot ? 'ไอน่า' : (msg.senderName || 'สมาชิก')}
+                                            </p>
+                                        )}
+                                        <div className={`px-3.5 py-2.5 text-[13px] break-words leading-6 shadow-sm ${
+                                            msg.isBot
+                                                ? 'bg-[#9FE870] text-slate-900 rounded-2xl rounded-tr-sm'
+                                                : 'bg-white/95 dark:bg-slate-800 text-slate-800 dark:text-slate-100 border border-slate-200/90 dark:border-slate-600/70 rounded-2xl rounded-tl-sm'
+                                        }`}>
+                                            {msg.type !== 'text' && (
+                                                <span className="inline-block mb-1.5 rounded bg-slate-100 dark:bg-slate-700 px-2 py-0.5 text-[10px] font-bold uppercase text-slate-500 dark:text-slate-300">{msg.type}</span>
+                                            )}
+                                            <span className="whitespace-pre-wrap">{renderChatText(msg.text || (msg.type !== 'text' ? `[${msg.type}]` : '-'))}</span>
+                                        </div>
+                                        <p className="mt-1 text-[10px] text-slate-400 dark:text-slate-500 px-1">{formatClock(msg.createdAt)}</p>
+                                    </div>
+                                </div>
+                            </div>
+                            </div>
+                        </React.Fragment>
+                    );
+                })}
+            </div>
+        </div>
+    );
+}
+
 // Main Task Detail Modal
-export default function TaskDetailModal({ task, employees, onClose, onUpdate, onJumpToReply, onJumpToQuestion }) {
+export default function TaskDetailModal({ task, employees, onClose, onUpdate, onJumpToReply, onJumpToQuestion, onDelete }) {
     const [attachments, setAttachments] = useState(task.attachments || []);
     const [linkInput, setLinkInput] = useState('');
     const [linkLabel, setLinkLabel] = useState('');
@@ -203,6 +415,7 @@ export default function TaskDetailModal({ task, employees, onClose, onUpdate, on
     const [uploading, setUploading] = useState(false);
     const [activeTab, setActiveTab] = useState('detail'); // detail | timeline | attachments
     const [status, setStatus] = useState(task.status);
+    const [chatFocusMessageId, setChatFocusMessageId] = useState('');
     const fileInputRef = useRef(null);
     const displayTaskTitle = useMemo(() => normalizeMeetingSummaryTitleForDisplay(task), [task]);
     const assigneeEmps = employees.filter(e => task.assignees?.includes(e.id));
@@ -340,6 +553,10 @@ export default function TaskDetailModal({ task, employees, onClose, onUpdate, on
 
         return contextLineMessageIds[0] || '';
     }, [task]);
+
+    useEffect(() => {
+        setChatFocusMessageId('');
+    }, [task?.id]);
 
     const timelineEvents = useMemo(() => {
         const events = [];
@@ -500,6 +717,16 @@ export default function TaskDetailModal({ task, employees, onClose, onUpdate, on
         });
     };
 
+    const handleDeleteTask = () => {
+        if (typeof onDelete !== 'function') {
+            return;
+        }
+
+        Promise.resolve(onDelete(task)).catch((err) => {
+            console.error('Delete task from modal failed:', err);
+        });
+    };
+
     const addTimelineEntry = () => {
         const detail = timelineInput.trim();
         if (!detail || !timelineAuthor) return;
@@ -595,12 +822,12 @@ export default function TaskDetailModal({ task, employees, onClose, onUpdate, on
     }, [task]);
 
     return createPortal(
-        <div className="modal-backdrop fixed inset-0 z-50 overflow-y-auto bg-slate-900/60 dark:bg-[#030303]/80 backdrop-blur-sm transition-colors duration-300">
-            <div
-                className="flex min-h-full items-center justify-center p-4 sm:p-6"
-                onClick={e => e.target === e.currentTarget && onClose()}
-            >
-                <div className="w-full max-w-2xl bg-white dark:bg-slate-900 rounded-[2rem] shadow-2xl overflow-hidden flex flex-col animate-scale-in border border-transparent dark:border-white/10 transition-colors duration-200" style={{ maxHeight: '92vh' }}>
+        <div className="modal-backdrop fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 bg-slate-900/60 dark:bg-[#030303]/80 backdrop-blur-sm transition-colors duration-300"
+            onClick={e => e.target === e.currentTarget && onClose()}
+        >
+                <div className="w-full max-w-5xl bg-white dark:bg-slate-900 rounded-[2rem] shadow-2xl overflow-hidden animate-scale-in border border-transparent dark:border-white/10 transition-colors duration-200 flex flex-row" style={{ maxHeight: '92vh', height: '92vh' }}>
+                {/* Task detail column */}
+                <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
                     {/* Header */}
                     <div className="flex items-start gap-4 px-7 pt-7 pb-5 relative">
                         {/* Color bar */}
@@ -623,10 +850,13 @@ export default function TaskDetailModal({ task, employees, onClose, onUpdate, on
                             <button onClick={onClose} className="p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors">
                                 <X size={20} />
                             </button>
-                            {questionLineMessageId && typeof onJumpToQuestion === 'function' && (
+                            {questionLineMessageId && (
                                 <button
                                     type="button"
-                                    onClick={() => onJumpToQuestion(task, questionLineMessageId)}
+                                    onClick={() => {
+                                        setChatFocusMessageId(questionLineMessageId);
+                                        onJumpToQuestion?.(task, questionLineMessageId);
+                                    }}
                                     className="text-[11px] font-semibold px-2 py-0.5 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-800 transition-colors"
                                 >
                                     ไปที่คำถาม
@@ -669,10 +899,13 @@ export default function TaskDetailModal({ task, employees, onClose, onUpdate, on
                                                     <p className="text-[11px] text-slate-400 dark:text-slate-500">
                                                         โดย {latestReplyAnswer.by} • {formatDateTime(latestReplyAnswer.at)}
                                                     </p>
-                                                    {latestReplyAnswer?.lineMessageId && typeof onJumpToReply === 'function' && (
+                                                    {latestReplyAnswer?.lineMessageId && (
                                                         <button
                                                             type="button"
-                                                            onClick={() => onJumpToReply(task, latestReplyAnswer.lineMessageId)}
+                                                            onClick={() => {
+                                                                setChatFocusMessageId(latestReplyAnswer.lineMessageId);
+                                                                onJumpToReply?.(task, latestReplyAnswer.lineMessageId);
+                                                            }}
                                                             className="text-[11px] font-semibold px-2 py-0.5 rounded-lg border border-indigo-200 text-indigo-600 hover:bg-indigo-50 dark:border-indigo-500/40 dark:text-indigo-300 dark:hover:bg-indigo-500/10 transition-colors"
                                                         >
                                                             ไปที่คำตอบ
@@ -878,16 +1111,27 @@ export default function TaskDetailModal({ task, employees, onClose, onUpdate, on
                     {/* Footer */}
                     <div className="flex flex-wrap items-center justify-between gap-3 px-7 py-5 border-t border-slate-100 dark:border-white/10 transition-colors bg-white/50 dark:bg-slate-900/50 backdrop-blur-md rounded-b-4xl">
                         <div className="flex flex-col items-start gap-1">
-                            <button
-                                onClick={handleArchiveToggle}
-                                className={`flex items-center gap-2 px-4 py-2 text-sm font-semibold rounded-xl transition-all ${isAbandoned
-                                        ? 'text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-500/10'
-                                        : 'text-amber-700 hover:text-amber-800 dark:text-amber-300 dark:hover:text-amber-200 hover:bg-amber-50 dark:hover:bg-amber-500/10'
-                                    }`}
-                            >
-                                {isAbandoned ? <RotateCcw size={15} /> : <Archive size={15} />}
-                                {isAbandoned ? 'กู้คืนงาน' : 'จัดเก็บ'}
-                            </button>
+                            <div className="flex items-center gap-2">
+                                <button
+                                    onClick={handleArchiveToggle}
+                                    className={`flex items-center gap-2 px-4 py-2 text-sm font-semibold rounded-xl transition-all ${isAbandoned
+                                            ? 'text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-500/10'
+                                            : 'text-amber-700 hover:text-amber-800 dark:text-amber-300 dark:hover:text-amber-200 hover:bg-amber-50 dark:hover:bg-amber-500/10'
+                                        }`}
+                                >
+                                    {isAbandoned ? <RotateCcw size={15} /> : <Archive size={15} />}
+                                    {isAbandoned ? 'กู้คืนงาน' : 'จัดเก็บ'}
+                                </button>
+                                {typeof onDelete === 'function' && (
+                                    <button
+                                        onClick={handleDeleteTask}
+                                        className="flex items-center gap-2 px-4 py-2 text-sm font-semibold rounded-xl text-rose-600 hover:text-rose-700 dark:text-rose-300 dark:hover:text-rose-200 hover:bg-rose-50 dark:hover:bg-rose-500/10 transition-all"
+                                    >
+                                        <Trash2 size={15} />
+                                        ลบ
+                                    </button>
+                                )}
+                            </div>
                             {!isAbandoned && (
                                 <p className="text-[10px] text-slate-400 dark:text-slate-500 pl-1">
                                     * เมื่อได้รับคำตอบแล้วจะจัดเก็บอัตโนมัติหลังจากได้รับคำตอบเกิน 5 วัน
@@ -899,9 +1143,17 @@ export default function TaskDetailModal({ task, employees, onClose, onUpdate, on
                         </div>
                     </div>
                 </div>
-            </div>
+
+                {/* Chat panel column */}
+                <div className="w-72 xl:w-80 flex-shrink-0 flex flex-col border-l border-slate-200 dark:border-slate-700" style={{ height: '100%' }}>
+                    <TaskChatPanel
+                        projectId={task?.projectId || task?.groupId || ''}
+                        focusMessageId={chatFocusMessageId}
+                    />
+                </div>
+
+                </div>
         </div>,
         document.body
     );
 }
-

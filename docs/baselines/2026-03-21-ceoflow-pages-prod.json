@@ -1,0 +1,37 @@
+{
+  "timestampUtc": "2026-03-21T09:20:52Z",
+  "baseUrl": "https://d19f6ccc.ceoflow.pages.dev",
+  "responseTimeMs": {
+    "root": {
+      "method": "GET",
+      "status": 200,
+      "runs": [296.43, 126.47, 129.69],
+      "avg": 184.2
+    },
+    "listGroups": {
+      "path": "/api/list-groups",
+      "method": "GET",
+      "status": 200,
+      "runs": [1291.6, 596.97, 638.93],
+      "avg": 842.5
+    },
+    "syncAllGroups": {
+      "path": "/api/sync-all-groups",
+      "method": "POST",
+      "status": 200,
+      "runs": [10685.13],
+      "avg": 10685.13
+    }
+  },
+  "syncCounters": {
+    "listGroupsCount": 1,
+    "syncAllSynced": 1,
+    "syncAllSuccess": true,
+    "syncAllSource": "kv",
+    "teamSynced": 3,
+    "teamAttempted": 3
+  },
+  "warnings": [
+    "sync-all payload reported fallback warnings (LINE group-members API access and Firestore permissions in one source path) while success=true"
+  ]
+}

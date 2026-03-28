@@ -1,3 +1,5 @@
+import { tryCreateTaggedLineTask } from './webhook.js';
+
 function jsonResponse(payload, status = 200) {
     return new Response(JSON.stringify(payload), {
         status,
@@ -54,6 +56,56 @@ function normalizeReplyPreviewText(value) {
         return '';
     }
     return text.slice(0, 320);
+}
+
+function normalizeSenderLineUserId(value) {
+    const lineUserId = String(value || '').trim();
+    if (!/^U[0-9a-f]{32}$/i.test(lineUserId)) {
+        return '';
+    }
+
+    return lineUserId;
+}
+
+function normalizeMentionCandidates(value) {
+    if (!Array.isArray(value)) {
+        return [];
+    }
+
+    const mentions = [];
+    const seen = new Set();
+    for (const rawMention of value) {
+        const lineUserId = normalizeSenderLineUserId(rawMention?.userId || rawMention?.lineUserId);
+        if (!lineUserId) {
+            continue;
+        }
+
+        const normalizedIndex = Number(rawMention?.index);
+        const normalizedLength = Number(rawMention?.length);
+        const mention = { userId: lineUserId };
+
+        if (Number.isFinite(normalizedIndex) && normalizedIndex >= 0) {
+            mention.index = Math.floor(normalizedIndex);
+        }
+
+        if (Number.isFinite(normalizedLength) && normalizedLength > 0) {
+            mention.length = Math.floor(normalizedLength);
+        }
+
+        const dedupeKey = `${lineUserId}:${mention.index ?? ''}`;
+        if (seen.has(dedupeKey)) {
+            continue;
+        }
+
+        seen.add(dedupeKey);
+        mentions.push(mention);
+
+        if (mentions.length >= 80) {
+            break;
+        }
+    }
+
+    return mentions;
 }
 
 function readFirestoreStringField(fields, key) {
@@ -207,6 +259,10 @@ export async function onRequest({ request, env }) {
     const text = normalizeOutgoingText(payload?.text);
     const replyToLineMessageId = normalizeReplyMessageId(payload?.replyToLineMessageId);
     const requestedReplyPreviewText = normalizeReplyPreviewText(payload?.replyPreviewText);
+    const senderLineUserId = normalizeSenderLineUserId(
+        payload?.senderLineUserId || payload?.lineUserId || payload?.senderId
+    );
+    const mentionCandidates = normalizeMentionCandidates(payload?.mentionCandidates || payload?.mentions);
 
     if (!groupId) {
         return jsonResponse({ error: 'Missing or invalid groupId' }, 400);
@@ -244,9 +300,53 @@ export async function onRequest({ request, env }) {
         replyPreviewText: replyMetadata.previewText || requestedReplyPreviewText
     }).catch(() => false);
 
+    const syntheticMessageId = `webmsg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const syntheticMessage = {
+        type: 'text',
+        id: syntheticMessageId,
+        text
+    };
+
+    if (replyToLineMessageId) {
+        syntheticMessage.quotedMessageId = replyToLineMessageId;
+        syntheticMessage.quote = { quotedMessageId: replyToLineMessageId };
+    }
+
+    if (mentionCandidates.length > 0) {
+        syntheticMessage.mention = { mentions: mentionCandidates };
+    }
+
+    const syntheticEvent = {
+        type: 'message',
+        timestamp: Date.now(),
+        source: {
+            type: 'group',
+            groupId,
+            ...(senderLineUserId ? { userId: senderLineUserId } : {})
+        },
+        message: syntheticMessage
+    };
+
+    const taggedTaskCapture = await tryCreateTaggedLineTask(syntheticEvent, env, {
+        projectId: groupId,
+        lineUserId: senderLineUserId
+    }).catch((err) => {
+        console.error('Web send tagged-task capture failed:', err);
+        return { matched: false, created: false, reason: 'exception' };
+    });
+
     return jsonResponse({
         success: true,
         persisted,
+        taskCapture: {
+            matched: Boolean(taggedTaskCapture?.matched),
+            created: Boolean(taggedTaskCapture?.created),
+            updated: Boolean(taggedTaskCapture?.updated),
+            duplicate: Boolean(taggedTaskCapture?.duplicate),
+            followup: Boolean(taggedTaskCapture?.followup),
+            reason: String(taggedTaskCapture?.reason || ''),
+            taskId: String(taggedTaskCapture?.taskId || '')
+        },
         reply: {
             linked: Boolean(replyToLineMessageId),
             quoteLinked: Boolean(replyMetadata.quoteToken) && !quoteFallbackUsed,
