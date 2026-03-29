@@ -2615,9 +2615,7 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
                         </div>
                         <div className="p-4">
                             {filteredTasks.length > 0 ? (
-                                <>
-                                    <p className="mb-2 text-xs text-slate-500 dark:text-slate-400">เลื่อนซ้าย-ขวาเพื่อดูแฟ้มการ์ดงานทั้งหมด</p>
-                                    <div className="flex gap-4 overflow-x-auto custom-scroll overscroll-x-contain pb-4 snap-x snap-mandatory">
+                                <div className="space-y-2">
                                     {filteredTasks.map((task) => {
                                         const formatIssues = Array.isArray(task?.formatIssues) ? task.formatIssues : [];
                                         const assigneeIds = Array.isArray(task?.assignees) ? task.assignees : [];
@@ -2634,7 +2632,6 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
                                         const accentColor = normalizeTaskStatus(task?.status) === 'abandoned'
                                             ? '#64748b'
                                             : (assigneeEmployees[0]?.color || '#24387E');
-                                        const cardBorderColor = hasAnyReply ? '#ef4444' : accentColor;
 
                                         return (
                                             <div
@@ -2648,118 +2645,59 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
                                                         setSelectedTask(task);
                                                     }
                                                 }}
-                                                className="group relative mt-3 min-w-[300px] sm:min-w-[340px] lg:min-w-[360px] max-w-[420px] snap-start shrink-0 cursor-pointer"
+                                                className="group relative border-l-4 pl-4 py-3 cursor-pointer transition-all hover:bg-slate-50/50 dark:hover:bg-slate-800/30 rounded-r-lg"
+                                                style={{ borderLeftColor: accentColor }}
                                             >
-                                                <div
-                                                    className="absolute left-0 rounded-t-xl"
-                                                    style={{
-                                                        top: -10,
-                                                        width: '44%',
-                                                        height: 12,
-                                                        background: accentColor,
-                                                        borderRadius: '8px 8px 0 0',
-                                                        opacity: 0.9
-                                                    }}
-                                                />
-
-                                                <button
-                                                    type="button"
-                                                    onClick={(event) => {
-                                                        event.stopPropagation();
-                                                        handleDeleteTask(task);
-                                                    }}
-                                                    onKeyDown={(event) => event.stopPropagation()}
-                                                    disabled={isDeletingTask}
-                                                    title="ลบงาน"
-                                                    className="absolute top-2 right-2 z-10 inline-flex h-7 w-7 items-center justify-center rounded-lg border border-red-200 bg-white/85 text-red-500 transition-colors hover:bg-red-50 disabled:opacity-60 disabled:cursor-not-allowed dark:border-red-800/60 dark:bg-slate-900/85 dark:text-red-300 dark:hover:bg-red-950/30"
-                                                >
-                                                    <Trash2 size={14} />
-                                                </button>
-
-                                                <div
-                                                    className="w-full text-left relative rounded-tl-none rounded-tr-2xl rounded-b-3xl border p-5 pr-11 transition-all duration-300 bg-slate-50 dark:bg-white/[0.02] hover:bg-white dark:hover:bg-[#111113] hover:-translate-y-0.5"
-                                                    style={{
-                                                        borderColor: `${cardBorderColor}66`,
-                                                        boxShadow: `0 10px 26px -16px ${cardBorderColor}66`
-                                                    }}
-                                                >
-                                                    <div className="absolute top-0 right-0 w-1.5 h-full rounded-r-3xl" style={{ background: accentColor, opacity: 0.45 }} />
-
-                                                    <div className="flex items-start justify-between gap-3 mb-2">
-                                                        <div className="min-w-0 flex-1">
-                                                            <div className="flex items-center gap-2 mb-1">
-                                                                {formatIssues.length > 0 && (
-                                                                    <AlertCircle size={15} className="text-yellow-500" title="รายการที่ต้องทำให้ชัดเจน" />
-                                                                )}
-                                                                <h4 className="font-bold text-slate-900 dark:text-white line-clamp-2 break-words">
-                                                                    {resolveTaskTitle(task)}
-                                                                </h4>
-                                                            </div>
-
-                                                            <div className="flex items-center gap-2 flex-wrap">
-                                                                {getStatusBadge(task.status)}
-                                                                {hasUnreadReply && (
-                                                                    <span className={`inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-lg ${unreadReplyOverdue
-                                                                        ? 'bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-300'
-                                                                        : 'bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300'
-                                                                        }`}>
-                                                                        <span className={`w-2 h-2 rounded-full ${unreadReplyOverdue ? 'bg-red-500 animate-pulse' : 'bg-rose-500'}`} />
-                                                                        {unreadReplyOverdue ? 'ยังไม่อ่าน > 7 วัน' : 'มีคำตอบใหม่'}
-                                                                    </span>
-                                                                )}
-                                                            </div>
+                                                <div className="flex items-start justify-between gap-3">
+                                                    <div className="min-w-0 flex-1">
+                                                        <div className="flex items-center gap-2 mb-1">
+                                                            <span 
+                                                                className="inline-block w-2 h-2 rounded-full shrink-0 mt-1"
+                                                                style={{ backgroundColor: accentColor }}
+                                                            />
+                                                            <h4 className="font-bold text-slate-900 dark:text-white line-clamp-1 break-words">
+                                                                {resolveTaskTitle(task)}
+                                                            </h4>
                                                         </div>
 
-                                                        <ChevronRight size={16} className="text-slate-400 shrink-0 mt-1 group-hover:translate-x-0.5 transition-all" />
-                                                    </div>
-
-                                                    <div className="flex items-center gap-2 mb-3">
-                                                        <div className="flex -space-x-1.5">
-                                                            {assigneeEmployees.map((employee) => (
-                                                                <div key={`${task.id}-${employee.id}`} title={employee.name}>
-                                                                    <Avatar
-                                                                        name={employee.name}
-                                                                        color={employee.color}
-                                                                        size={22}
-                                                                        url={employee.avatar}
-                                                                    />
-                                                                </div>
-                                                            ))}
-                                                        </div>
-                                                        <span className="text-xs text-slate-500 dark:text-slate-400 truncate">
-                                                            ผู้รับผิดชอบ: {task.assignee || 'สมาชิกในกลุ่ม'}
-                                                        </span>
-                                                    </div>
-
-                                                    {formatIssues.length > 0 && (
-                                                        <div className="mb-3 flex flex-wrap gap-1">
-                                                            {formatIssues.map((issue, index) => (
-                                                                <span key={`${task.id}-issue-${index}`} className="px-2 py-0.5 bg-yellow-100 text-yellow-700 text-[11px] rounded-lg">
-                                                                    {issue}
+                                                        <div className="flex items-center gap-2 flex-wrap ml-3">
+                                                            {getStatusBadge(task.status)}
+                                                            {formatIssues.length > 0 && (
+                                                                <AlertCircle size={14} className="text-yellow-500" title="รายการที่ต้องทำให้ชัดเจน" />
+                                                            )}
+                                                            {hasUnreadReply && (
+                                                                <span className={`inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-lg ${unreadReplyOverdue
+                                                                    ? 'bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-300'
+                                                                    : 'bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300'
+                                                                    }`}>
+                                                                    <span className={`w-1.5 h-1.5 rounded-full ${unreadReplyOverdue ? 'bg-red-500 animate-pulse' : 'bg-rose-500'}`} />
+                                                                    {unreadReplyOverdue ? 'ยังไม่อ่าน > 7 วัน' : 'มีคำตอบใหม่'}
                                                                 </span>
-                                                            ))}
+                                                            )}
                                                         </div>
-                                                    )}
+                                                    </div>
 
-                                                    <div className="flex items-center justify-between gap-4 pt-2.5 border-t border-slate-200/70 dark:border-slate-700/70">
-                                                        <div className="flex items-center gap-1 text-xs text-slate-500 dark:text-slate-400">
-                                                            <Calendar size={12} />
-                                                            <span>{formatDate(task.deadline) || '-'}</span>
-                                                        </div>
-
-                                                        <span
-                                                            className="text-[11px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-lg"
-                                                            style={{ backgroundColor: `${accentColor}1f`, color: accentColor }}
+                                                    <div className="flex items-center gap-2 shrink-0">
+                                                        <button
+                                                            type="button"
+                                                            onClick={(event) => {
+                                                                event.stopPropagation();
+                                                                handleDeleteTask(task);
+                                                            }}
+                                                            onKeyDown={(event) => event.stopPropagation()}
+                                                            disabled={isDeletingTask}
+                                                            title="ลบงาน"
+                                                            className="inline-flex h-6 w-6 items-center justify-center rounded-lg border border-red-200 bg-white/85 text-red-500 transition-colors hover:bg-red-50 disabled:opacity-60 disabled:cursor-not-allowed dark:border-red-800/60 dark:bg-slate-900/85 dark:text-red-300 dark:hover:bg-red-950/30 opacity-0 group-hover:opacity-100"
                                                         >
-                                                            {task?.type === 'team' ? 'ทีม' : 'เดี่ยว'}
-                                                        </span>
+                                                            <Trash2 size={12} />
+                                                        </button>
+                                                        <ChevronRight size={16} className="text-slate-400 group-hover:translate-x-0.5 transition-all" />
                                                     </div>
                                                 </div>
                                             </div>
                                         );
                                     })}
-                                    </div>
-                                </>
+                                </div>
                             ) : (
                                 <div className="p-8 text-center text-slate-500">
                                     <FolderKanban size={48} className="mx-auto mb-3 text-slate-300" />
