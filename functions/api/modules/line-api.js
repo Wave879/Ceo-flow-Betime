@@ -181,6 +181,12 @@ async function pushText(to, text, env, options = {}) {
 
     const normalizedText = String(text || '');
     const message = { type: 'text', text: normalizedText };
+    
+    // Add mentions if provided
+    if (Array.isArray(options?.mentions) && options.mentions.length > 0) {
+        message.mentions = options.mentions;
+    }
+
     const quoteToken = String(options?.quoteToken || '').trim();
     if (quoteToken) {
         message.quoteToken = quoteToken;

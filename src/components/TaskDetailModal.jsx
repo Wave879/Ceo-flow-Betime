@@ -9,7 +9,7 @@ import {
 import { Avatar, StatusBadge, formatDate } from './UI';
 import { storage, db } from '../firebase';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { collection, query, onSnapshot } from 'firebase/firestore';
+import { collection, query, onSnapshot, where, limit } from 'firebase/firestore';
 
 const URL_REGEX = /(?:https?:\/\/|www\.)[^\s<>"']+/giu;
 function renderChatText(text = '') {
@@ -117,6 +117,38 @@ function normalizeMentionDisplayName(name = '') {
         .replace(/[,:;!?，。、]+$/u, '')
         .replace(/\s+/g, ' ')
         .trim();
+}
+
+function extractTaskCommandText(task = {}) {
+    const fallbackTitle = String(task?.name || task?.title || '').trim();
+    const rawSourceText = String(task?.sourceText || task?.rawText || '').trim();
+    const sourceText = (rawSourceText || fallbackTitle).replace(/\s+/g, ' ').trim();
+    if (!sourceText) {
+        return '';
+    }
+
+    const ccMatch = sourceText.match(/(?:^|\s)(?:cc|copy)(?:\s|[:：]|$)/iu);
+    const beforeCc = ccMatch && Number.isFinite(ccMatch.index)
+        ? sourceText.slice(0, ccMatch.index).trim()
+        : sourceText;
+
+    const commandText = beforeCc
+        .replace(/^(@[^\s]+\s*)+/u, '')
+        .replace(/[\/／]สั่ง/gu, ' ')
+        .replace(/^\/?(?:ai|ask|ถาม|ไอน่า)\s*/iu, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    const normalized = commandText || fallbackTitle;
+    if (!normalized) {
+        return '';
+    }
+
+    if (normalized.length > 160) {
+        return `${normalized.slice(0, 157)}...`;
+    }
+
+    return normalized;
 }
 
 // Small helper: icon by attachment type
@@ -244,6 +276,7 @@ function AttachmentItem({ att, onDelete }) {
 // Minimal chat panel — loads messages for the task's project group
 function TaskChatPanel({ projectId, focusMessageId = '' }) {
     const [messages, setMessages] = useState([]);
+    const [lineUserNameMap, setLineUserNameMap] = useState(new Map());
     const [loading, setLoading] = useState(true);
     const scrollRef = useRef(null);
     const messageRefs = useRef(new Map());
@@ -287,6 +320,44 @@ function TaskChatPanel({ projectId, focusMessageId = '' }) {
     }, [projectId]);
 
     useEffect(() => {
+        const gid = String(projectId || '').trim();
+        if (!gid || !db) {
+            setLineUserNameMap(new Map());
+            return undefined;
+        }
+
+        const groupUsersRef = collection(db, 'groupUsers');
+        const groupUsersQuery = query(
+            groupUsersRef,
+            where('projectGroup', '==', gid),
+            limit(800)
+        );
+
+        const unsubscribe = onSnapshot(
+            groupUsersQuery,
+            (snapshot) => {
+                const nextMap = new Map();
+                for (const docSnap of (snapshot.docs || [])) {
+                    const raw = docSnap.data() || {};
+                    const userId = String(raw.userId || raw.lineUserId || docSnap.id || '').trim();
+                    const displayName = String(raw.displayName || raw.name || '').trim();
+                    if (!userId || !displayName) {
+                        continue;
+                    }
+                    nextMap.set(userId, displayName);
+                }
+
+                setLineUserNameMap(nextMap);
+            },
+            () => {
+                setLineUserNameMap(new Map());
+            }
+        );
+
+        return () => unsubscribe();
+    }, [projectId]);
+
+    useEffect(() => {
         if (scrollRef.current) requestAnimationFrame(() => { scrollRef.current.scrollTop = scrollRef.current.scrollHeight; });
     }, [messages.length]);
 
@@ -317,16 +388,23 @@ function TaskChatPanel({ projectId, focusMessageId = '' }) {
     }, [focusMessageId, messages]);
 
     return (
-        <div className="flex flex-col h-full border-l border-slate-100 dark:border-white/10">
+        <div className="flex flex-col h-full border-t lg:border-t-0 lg:border-l border-slate-100/90 dark:border-white/10 bg-slate-50/40 dark:bg-slate-900/40">
             {/* Chat header */}
-            <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-100 dark:border-white/10 flex-shrink-0">
-                <MessageCircle size={14} className="text-indigo-500" />
-                <span className="text-xs font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wider">แชทกลุ่ม</span>
+            <div className="flex items-center justify-between gap-2 px-4 py-3.5 border-b border-slate-100/90 dark:border-white/10 flex-shrink-0 bg-white/70 dark:bg-slate-900/60 backdrop-blur-sm">
+                <div className="flex items-center gap-2">
+                    <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-indigo-100 dark:bg-indigo-500/20">
+                        <MessageCircle size={13} className="text-indigo-600 dark:text-indigo-300" />
+                    </span>
+                    <span className="text-xs font-bold text-slate-700 dark:text-slate-200 uppercase tracking-wider">แชทกลุ่ม</span>
+                </div>
+                <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-300">
+                    {messages.length} ข้อความ
+                </span>
             </div>
             {/* Messages */}
             <div
                 ref={scrollRef}
-                className="flex-1 overflow-y-auto custom-scroll p-4 bg-gradient-to-b from-slate-50/70 to-white dark:from-slate-900/70 dark:to-slate-900"
+                className="flex-1 overflow-y-auto custom-scroll px-4 py-5 bg-[radial-gradient(circle_at_top_left,_rgba(99,102,241,0.13),_transparent_45%),radial-gradient(circle_at_bottom_right,_rgba(14,165,233,0.10),_transparent_45%)] dark:bg-[radial-gradient(circle_at_top_left,_rgba(79,70,229,0.20),_transparent_42%),radial-gradient(circle_at_bottom_right,_rgba(14,165,233,0.16),_transparent_42%)]"
                 style={{ minHeight: 0 }}
             >
                 {loading ? (
@@ -337,6 +415,14 @@ function TaskChatPanel({ projectId, focusMessageId = '' }) {
                         <p className="text-xs">ยังไม่มีข้อความ</p>
                     </div>
                 ) : messages.map((msg, idx) => {
+                    const embeddedSenderName = String(msg.senderName || '').trim();
+                    const mappedSenderName = lineUserNameMap.get(String(msg.lineUserId || '').trim()) || '';
+                    const fallbackSenderName = msg.lineUserId
+                        ? `LINE-${String(msg.lineUserId || '').slice(-6)}`
+                        : 'ไม่ทราบผู้ส่ง';
+                    const senderDisplayName = (embeddedSenderName && !isLineFallbackDisplayName(embeddedSenderName))
+                        ? embeddedSenderName
+                        : (mappedSenderName || embeddedSenderName || fallbackSenderName);
                     const prev = idx > 0 ? messages[idx - 1] : null;
                     const prevId = prev ? (String(prev.lineUserId || '') || (prev.isBot ? '__bot__' : prev.senderName)) : '';
                     const curId = String(msg.lineUserId || '') || (msg.isBot ? '__bot__' : msg.senderName);
@@ -346,9 +432,9 @@ function TaskChatPanel({ projectId, focusMessageId = '' }) {
                     return (
                         <React.Fragment key={msg.id}>
                             {showDateDivider && (
-                                <div className="my-3 flex items-center gap-2">
+                                <div className="my-4 flex items-center gap-2">
                                     <div className="h-px flex-1 bg-slate-200/80 dark:bg-slate-700/70" />
-                                    <span className="rounded-full bg-white/90 dark:bg-slate-800 px-2.5 py-0.5 text-[10px] font-semibold text-slate-500 dark:text-slate-300 border border-slate-200/80 dark:border-slate-700/70">
+                                    <span className="rounded-full bg-white/95 dark:bg-slate-800/95 px-3 py-1 text-[10px] font-semibold text-slate-500 dark:text-slate-300 border border-slate-200/80 dark:border-slate-700/70 shadow-sm">
                                         {formatChatDay(msg.createdAt)}
                                     </span>
                                     <div className="h-px flex-1 bg-slate-200/80 dark:bg-slate-700/70" />
@@ -365,34 +451,34 @@ function TaskChatPanel({ projectId, focusMessageId = '' }) {
                                 }}
                                 className={`rounded-2xl px-1 transition-all duration-300 ${
                                     highlightedMessageId === msg.id
-                                        ? 'ring-2 ring-indigo-300/70 dark:ring-indigo-500/60 bg-indigo-50/40 dark:bg-indigo-500/10'
+                                        ? 'ring-2 ring-indigo-300/70 dark:ring-indigo-500/60 bg-indigo-50/50 dark:bg-indigo-500/15 shadow-[0_0_0_1px_rgba(99,102,241,0.20)]'
                                         : ''
                                 }`}
                             >
                             <div className={`flex ${msg.isBot ? 'justify-end' : 'justify-start'} ${sameCluster ? 'mt-1' : 'mt-3'}`}>
-                                <div className={`flex max-w-[92%] md:max-w-[84%] items-end gap-2 ${msg.isBot ? 'flex-row-reverse' : 'flex-row'}`}>
+                                <div className={`flex max-w-[97%] md:max-w-[92%] items-end gap-2 ${msg.isBot ? 'flex-row-reverse' : 'flex-row'}`}>
                                     {!msg.isBot && (
                                         sameCluster
                                             ? <div className="w-7 shrink-0" />
-                                            : <div className="w-7 h-7 rounded-full bg-gradient-to-br from-[#24387E] to-[#3F5BC7] text-white text-[10px] font-bold flex items-center justify-center shrink-0">{(msg.senderName || '?').slice(0, 1).toUpperCase()}</div>
+                                            : <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[#24387E] to-[#3F5BC7] text-white text-[10px] font-bold flex items-center justify-center shrink-0 shadow-sm ring-2 ring-white/80 dark:ring-slate-900/80">{senderDisplayName.slice(0, 1).toUpperCase()}</div>
                                     )}
                                     <div className={`flex flex-col ${msg.isBot ? 'items-end' : 'items-start'}`}>
                                         {!sameCluster && (
                                             <p className="mb-1 px-1 text-[11px] font-semibold text-slate-500 dark:text-slate-400">
-                                                {msg.isBot ? 'ไอน่า' : (msg.senderName || 'สมาชิก')}
+                                                {msg.isBot ? 'ไอน่า' : senderDisplayName}
                                             </p>
                                         )}
-                                        <div className={`px-3.5 py-2.5 text-[13px] break-words leading-6 shadow-sm ${
+                                        <div className={`px-4 py-3 text-[14px] break-words leading-7 shadow-[0_12px_30px_-22px_rgba(15,23,42,0.55)] backdrop-blur-[1px] ${
                                             msg.isBot
-                                                ? 'bg-[#9FE870] text-slate-900 rounded-2xl rounded-tr-sm'
-                                                : 'bg-white/95 dark:bg-slate-800 text-slate-800 dark:text-slate-100 border border-slate-200/90 dark:border-slate-600/70 rounded-2xl rounded-tl-sm'
+                                            ? 'bg-[#9FE870] text-slate-900 rounded-2xl rounded-tr-md border border-[#88d75a]'
+                                            : 'bg-white/95 dark:bg-slate-800/95 text-slate-800 dark:text-slate-100 border border-slate-200/90 dark:border-slate-600/70 rounded-2xl rounded-tl-md'
                                         }`}>
                                             {msg.type !== 'text' && (
                                                 <span className="inline-block mb-1.5 rounded bg-slate-100 dark:bg-slate-700 px-2 py-0.5 text-[10px] font-bold uppercase text-slate-500 dark:text-slate-300">{msg.type}</span>
                                             )}
                                             <span className="whitespace-pre-wrap">{renderChatText(msg.text || (msg.type !== 'text' ? `[${msg.type}]` : '-'))}</span>
                                         </div>
-                                        <p className="mt-1 text-[10px] text-slate-400 dark:text-slate-500 px-1">{formatClock(msg.createdAt)}</p>
+                                        <p className="mt-1.5 text-[10px] font-medium text-slate-400 dark:text-slate-500 px-1">{formatClock(msg.createdAt)}</p>
                                     </div>
                                 </div>
                             </div>
@@ -417,6 +503,7 @@ export default function TaskDetailModal({ task, employees, onClose, onUpdate, on
     const [status, setStatus] = useState(task.status);
     const [chatFocusMessageId, setChatFocusMessageId] = useState('');
     const fileInputRef = useRef(null);
+    const chatPanelColumnRef = useRef(null);
     const displayTaskTitle = useMemo(() => normalizeMeetingSummaryTitleForDisplay(task), [task]);
     const assigneeEmps = employees.filter(e => task.assignees?.includes(e.id));
     const mentionAssigneeNames = useMemo(() => {
@@ -433,6 +520,9 @@ export default function TaskDetailModal({ task, employees, onClose, onUpdate, on
         const fallbackMention = normalizeMentionDisplayName(titleMention);
         return fallbackMention ? [fallbackMention] : [];
     }, [task?.lineAssigneeNames, displayTaskTitle]);
+    const assigneeCommandText = useMemo(() => {
+        return extractTaskCommandText(task);
+    }, [task]);
     const assigneeRows = useMemo(() => {
         const rows = assigneeEmps.map((employee, index) => {
             const mentionName = String(mentionAssigneeNames[index] || '').trim();
@@ -445,7 +535,7 @@ export default function TaskDetailModal({ task, employees, onClose, onUpdate, on
             return {
                 ...employee,
                 displayName,
-                displayPosition: String(employee?.position || '').trim() || 'สมาชิกทีม'
+                displayPosition: assigneeCommandText || String(employee?.position || '').trim() || 'สมาชิกทีม'
             };
         });
 
@@ -454,14 +544,14 @@ export default function TaskDetailModal({ task, employees, onClose, onUpdate, on
                 id: `mention_${index}_${name}`,
                 name,
                 displayName: name,
-                displayPosition: 'จากการแท็กในแชท',
+                displayPosition: assigneeCommandText || 'จากการแท็กในแชท',
                 color: '#6366f1',
                 avatar: ''
             }));
         }
 
         return rows;
-    }, [assigneeEmps, mentionAssigneeNames]);
+    }, [assigneeEmps, mentionAssigneeNames, assigneeCommandText]);
     const mainColor = assigneeEmps[0]?.color || '#6366f1';
     const isAbandoned = status === 'abandoned' || task.status === 'abandoned';
     const timelineAuthor = employees.find((employee) => employee.id === timelineAuthorId);
@@ -553,6 +643,7 @@ export default function TaskDetailModal({ task, employees, onClose, onUpdate, on
 
         return contextLineMessageIds[0] || '';
     }, [task]);
+    const latestReplyLineMessageId = String(latestReplyAnswer?.lineMessageId || '').trim();
 
     useEffect(() => {
         setChatFocusMessageId('');
@@ -821,11 +912,45 @@ export default function TaskDetailModal({ task, employees, onClose, onUpdate, on
         // Cleanup logic goes here when unmounting
     }, [task]);
 
+    const handleJumpToQuestion = () => {
+        if (chatPanelColumnRef.current) {
+            chatPanelColumnRef.current.scrollIntoView({
+                behavior: 'smooth',
+                block: 'nearest',
+                inline: 'end'
+            });
+        }
+
+        if (!questionLineMessageId) {
+            return;
+        }
+
+        setChatFocusMessageId(questionLineMessageId);
+        onJumpToQuestion?.(task, questionLineMessageId);
+    };
+
+    const handleJumpToAnswer = () => {
+        if (chatPanelColumnRef.current) {
+            chatPanelColumnRef.current.scrollIntoView({
+                behavior: 'smooth',
+                block: 'nearest',
+                inline: 'end'
+            });
+        }
+
+        if (!latestReplyLineMessageId) {
+            return;
+        }
+
+        setChatFocusMessageId(latestReplyLineMessageId);
+        onJumpToReply?.(task, latestReplyLineMessageId);
+    };
+
     return createPortal(
-        <div className="modal-backdrop fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 bg-slate-900/60 dark:bg-[#030303]/80 backdrop-blur-sm transition-colors duration-300"
+        <div className="modal-backdrop fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 bg-slate-950/65 dark:bg-[#020202]/85 backdrop-blur-md transition-colors duration-300"
             onClick={e => e.target === e.currentTarget && onClose()}
         >
-                <div className="w-full max-w-5xl bg-white dark:bg-slate-900 rounded-[2rem] shadow-2xl overflow-hidden animate-scale-in border border-transparent dark:border-white/10 transition-colors duration-200 flex flex-row" style={{ maxHeight: '92vh', height: '92vh' }}>
+            <div className="w-full max-w-[1400px] bg-white/95 dark:bg-slate-900/95 rounded-[2rem] shadow-[0_35px_90px_-40px_rgba(15,23,42,0.75)] overflow-hidden animate-scale-in border border-slate-200/70 dark:border-white/10 transition-colors duration-200 flex flex-col lg:flex-row backdrop-blur-sm" style={{ maxHeight: '92vh', height: '92vh' }}>
                 {/* Task detail column */}
                 <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
                     {/* Header */}
@@ -850,18 +975,15 @@ export default function TaskDetailModal({ task, employees, onClose, onUpdate, on
                             <button onClick={onClose} className="p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors">
                                 <X size={20} />
                             </button>
-                            {questionLineMessageId && (
-                                <button
-                                    type="button"
-                                    onClick={() => {
-                                        setChatFocusMessageId(questionLineMessageId);
-                                        onJumpToQuestion?.(task, questionLineMessageId);
-                                    }}
-                                    className="text-[11px] font-semibold px-2 py-0.5 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-800 transition-colors"
-                                >
-                                    ไปที่คำถาม
-                                </button>
-                            )}
+                            <button
+                                type="button"
+                                onClick={handleJumpToQuestion}
+                                disabled={!questionLineMessageId}
+                                className="text-[11px] font-semibold px-2 py-0.5 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-800 transition-colors"
+                                title={questionLineMessageId ? 'ไปที่ข้อความคำถามในแชทด้านขวา' : 'ยังไม่พบข้อความคำถามของงานนี้'}
+                            >
+                                ไปที่คำถาม
+                            </button>
                         </div>
                     </div>
 
@@ -899,24 +1021,32 @@ export default function TaskDetailModal({ task, employees, onClose, onUpdate, on
                                                     <p className="text-[11px] text-slate-400 dark:text-slate-500">
                                                         โดย {latestReplyAnswer.by} • {formatDateTime(latestReplyAnswer.at)}
                                                     </p>
-                                                    {latestReplyAnswer?.lineMessageId && (
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => {
-                                                                setChatFocusMessageId(latestReplyAnswer.lineMessageId);
-                                                                onJumpToReply?.(task, latestReplyAnswer.lineMessageId);
-                                                            }}
-                                                            className="text-[11px] font-semibold px-2 py-0.5 rounded-lg border border-indigo-200 text-indigo-600 hover:bg-indigo-50 dark:border-indigo-500/40 dark:text-indigo-300 dark:hover:bg-indigo-500/10 transition-colors"
-                                                        >
-                                                            ไปที่คำตอบ
-                                                        </button>
-                                                    )}
+                                                    <button
+                                                        type="button"
+                                                        onClick={handleJumpToAnswer}
+                                                        disabled={!latestReplyLineMessageId}
+                                                        className="text-[11px] font-semibold px-2 py-0.5 rounded-lg border border-indigo-200 text-indigo-600 hover:bg-indigo-50 disabled:opacity-50 disabled:cursor-not-allowed dark:border-indigo-500/40 dark:text-indigo-300 dark:hover:bg-indigo-500/10 transition-colors"
+                                                        title={latestReplyLineMessageId ? 'ไปที่ข้อความคำตอบในแชทด้านขวา' : 'ยังไม่พบข้อความคำตอบของงานนี้'}
+                                                    >
+                                                        ไปที่คำตอบ
+                                                    </button>
                                                 </div>
                                             </>
                                         ) : (
-                                            <p className="text-sm italic text-slate-400 dark:text-slate-500">
-                                                รอรับคำตอบจากการตอบกลับ...
-                                            </p>
+                                            <div className="flex flex-wrap items-center justify-between gap-2">
+                                                <p className="text-sm italic text-slate-400 dark:text-slate-500">
+                                                    รอรับคำตอบจากการตอบกลับ...
+                                                </p>
+                                                <button
+                                                    type="button"
+                                                    onClick={handleJumpToAnswer}
+                                                    disabled={!latestReplyLineMessageId}
+                                                    className="text-[11px] font-semibold px-2 py-0.5 rounded-lg border border-indigo-200 text-indigo-600 hover:bg-indigo-50 disabled:opacity-50 disabled:cursor-not-allowed dark:border-indigo-500/40 dark:text-indigo-300 dark:hover:bg-indigo-500/10 transition-colors"
+                                                    title={latestReplyLineMessageId ? 'ไปที่ข้อความคำตอบในแชทด้านขวา' : 'ยังไม่พบข้อความคำตอบของงานนี้'}
+                                                >
+                                                    ไปที่คำตอบ
+                                                </button>
+                                            </div>
                                         )}
                                     </div>
                                 </div>
@@ -1145,7 +1275,7 @@ export default function TaskDetailModal({ task, employees, onClose, onUpdate, on
                 </div>
 
                 {/* Chat panel column */}
-                <div className="w-72 xl:w-80 flex-shrink-0 flex flex-col border-l border-slate-200 dark:border-slate-700" style={{ height: '100%' }}>
+                <div ref={chatPanelColumnRef} className="w-full lg:w-[28rem] xl:w-[32rem] flex-shrink-0 flex flex-col border-t lg:border-t-0 lg:border-l border-slate-200 dark:border-slate-700" style={{ height: '100%' }}>
                     <TaskChatPanel
                         projectId={task?.projectId || task?.groupId || ''}
                         focusMessageId={chatFocusMessageId}

@@ -3,7 +3,7 @@ import {
     FolderKanban, Users, MessageCircle, AlertCircle, CheckCircle,
     Clock, Send, Plus, Search, Trash2, RefreshCcw, Link2, X, Calendar, ChevronRight, Archive, Pencil, Check
 } from 'lucide-react';
-import { collection, query, where, orderBy, limit, onSnapshot, doc, updateDoc } from 'firebase/firestore';
+import { collection, query, where, limit, onSnapshot, doc, updateDoc } from 'firebase/firestore';
 import { db } from '../firebase';
 import TaskDetailModal from '../components/TaskDetailModal';
 import { Avatar, StatusBadge, formatDate } from '../components/UI';
@@ -848,6 +848,52 @@ function formatTaskDeadline(deadline = '') {
     }).format(parsed);
 }
 
+function toBangkokDateKey(date = new Date()) {
+    const formatter = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'Asia/Bangkok',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit'
+    });
+    const parts = formatter.formatToParts(date);
+    const year = parts.find((part) => part.type === 'year')?.value || '1970';
+    const month = parts.find((part) => part.type === 'month')?.value || '01';
+    const day = parts.find((part) => part.type === 'day')?.value || '01';
+    return `${year}-${month}-${day}`;
+}
+
+function normalizeDeadlineDateKey(deadline = '') {
+    const raw = String(deadline || '').trim();
+    if (!raw) {
+        return '';
+    }
+
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+        return raw;
+    }
+
+    const parsed = new Date(raw);
+    if (Number.isNaN(parsed.getTime())) {
+        return '';
+    }
+
+    return toBangkokDateKey(parsed);
+}
+
+function isTaskDeadlineOverdue(task = {}) {
+    const status = normalizeTaskStatus(task?.status);
+    if (status === 'completed' || status === 'abandoned') {
+        return false;
+    }
+
+    const deadlineDateKey = normalizeDeadlineDateKey(task?.deadline);
+    if (!deadlineDateKey) {
+        return false;
+    }
+
+    return deadlineDateKey < toBangkokDateKey(new Date());
+}
+
 function GroupAvatar({ name, pictureUrl, color, sizeClass = 'w-10 h-10', textClass = 'text-sm' }) {
     const initial = String(name || '?').trim().charAt(0).toUpperCase() || '?';
     const hasPicture = Boolean(String(pictureUrl || '').trim());
@@ -1022,7 +1068,7 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
 
         setMessagesLoading(true);
         const messagesRef = collection(db, 'projects', groupId, 'messages');
-        const messagesQuery = query(messagesRef, orderBy('createdAt', 'desc'));
+        const messagesQuery = query(messagesRef);
 
         const unsubscribe = onSnapshot(
             messagesQuery,
@@ -2629,9 +2675,12 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
                                         const hasAnyReply = replyMeta.hasReply;
                                         const hasUnreadReply = isTaskReplyUnread(task);
                                         const unreadReplyOverdue = isTaskReplyUnreadOverdue(task);
-                                        const accentColor = normalizeTaskStatus(task?.status) === 'abandoned'
+                                        const isDeadlineOverdue = isTaskDeadlineOverdue(task);
+                                        const accentColor = isDeadlineOverdue
+                                            ? '#ef4444'
+                                            : (normalizeTaskStatus(task?.status) === 'abandoned'
                                             ? '#64748b'
-                                            : (assigneeEmployees[0]?.color || '#24387E');
+                                            : (assigneeEmployees[0]?.color || '#24387E'));
 
                                         return (
                                             <div

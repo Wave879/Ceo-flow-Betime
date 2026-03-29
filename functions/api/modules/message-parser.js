@@ -144,6 +144,17 @@ function parseThaiRelativeDate(rawText = '') {
         return { iso, display, raw: 'พรุ่งนี้' };
     }
 
+    // มะรืน (day after tomorrow)
+    if (/มะรืน|วันมะรืน|the day after tomorrow/.test(text)) {
+        const dayAfterTomorrow = new Date(today);
+        dayAfterTomorrow.setUTCDate(dayAfterTomorrow.getUTCDate() + 2);
+        const iso = dayAfterTomorrow.toISOString().split('T')[0];
+        const day = dayAfterTomorrow.getUTCDate();
+        const month = dayAfterTomorrow.getUTCMonth() + 1;
+        const display = `${String(day).padStart(2, '0')}/${String(month).padStart(2, '0')}`;
+        return { iso, display, raw: 'มะรืน' };
+    }
+
     // สัปดาห์นี้, within week
     if (/สัปดาห์นี้|week|สปดาห์/.test(text)) {
         const week = new Date(today);
@@ -153,6 +164,27 @@ function parseThaiRelativeDate(rawText = '') {
         const month = week.getUTCMonth() + 1;
         const display = `${String(day).padStart(2, '0')}/${String(month).padStart(2, '0')}`;
         return { iso, display, raw: 'ภายในสัปดาห์' };
+    }
+
+    // สัปดาห์หน้า (next week)
+    if (/สัปดาห์หน้า|weekหน้า|next week/.test(text)) {
+        const nextWeek = new Date(today);
+        nextWeek.setUTCDate(nextWeek.getUTCDate() + 7);
+        const iso = nextWeek.toISOString().split('T')[0];
+        const day = nextWeek.getUTCDate();
+        const month = nextWeek.getUTCMonth() + 1;
+        const display = `${String(day).padStart(2, '0')}/${String(month).padStart(2, '0')}`;
+        return { iso, display, raw: 'สัปดาห์หน้า' };
+    }
+
+    // สิ้นเดือน (end of current month)
+    if (/สิ้นเดือน|ปลายเดือน|end of month/.test(text)) {
+        const endOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + 1, 0));
+        const iso = endOfMonth.toISOString().split('T')[0];
+        const day = endOfMonth.getUTCDate();
+        const month = endOfMonth.getUTCMonth() + 1;
+        const display = `${String(day).padStart(2, '0')}/${String(month).padStart(2, '0')}`;
+        return { iso, display, raw: 'สิ้นเดือน' };
     }
 
     return null;
@@ -244,6 +276,45 @@ function findCcBoundaryIndex(rawText = '') {
     }
 
     return Number.isFinite(match.index) ? match.index : -1;
+}
+
+function normalizeMentionName(rawToken = '') {
+    const cleaned = String(rawToken || '')
+        .replace(/^@+/, '')
+        .replace(/^[\s:：,，;.。]+|[\s:：,，;.。]+$/gu, '')
+        .trim();
+
+    if (!cleaned) {
+        return '';
+    }
+
+    const normalized = cleaned
+        .toLowerCase()
+        .replace(/[\u2010-\u2015\-_\.]+/g, '');
+
+    const isBotLikeMention = normalized.includes('aina')
+        || normalized.includes('ไอน่า')
+        || normalized === 'ai'
+        || normalized === 'bot';
+
+    if (isBotLikeMention) {
+        return '';
+    }
+
+    return cleaned;
+}
+
+function extractMentionNames(rawText = '') {
+    const source = String(rawText || '');
+    if (!source) {
+        return [];
+    }
+
+    const tokens = Array.from(source.matchAll(/@([^\s@]+)/gu))
+        .map((match) => normalizeMentionName(match?.[1] || ''))
+        .filter(Boolean);
+
+    return [...new Set(tokens)];
 }
 
 function parseMeetingSummaryTaskCandidate(rawText = '') {
@@ -366,24 +437,41 @@ function parseTaggedLineTaskCandidate(rawText = '') {
             .replace(/[\/／]สั่ง/gu, '')
             .replace(/\s+/g, ' ')
             .trim();
+        const dateInfo = parseMeetingDateFromText(cleanTitle);
         const ccBoundaryIndex = findCcBoundaryIndex(cleanTitle);
         const taskSegment = ccBoundaryIndex >= 0
             ? cleanTitle.slice(0, ccBoundaryIndex).trim()
             : cleanTitle;
+        const ccSegment = ccBoundaryIndex >= 0
+            ? cleanTitle.slice(ccBoundaryIndex).trim()
+            : '';
+        const lineAssigneeNames = extractMentionNames(taskSegment);
+        const lineRelatedNames = extractMentionNames(ccSegment);
         let title = stripLeadingBotMentions(taskSegment)
             .replace(/^(@[^\s]+\s*)+/u, '')
             .replace(/^\/?(?:ai|ask|ถาม|ไอน่า)\s*/iu, '')
             .replace(/\s+/g, ' ')
             .trim();
+
+        if (dateInfo?.raw) {
+            title = title
+                .replace(dateInfo.raw, ' ')
+                .replace(/[()\[\]]/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+        }
+
         if (!title) title = 'งานจากข้อความที่ถูกสั่งใน LINE';
         return {
             matched: true,
             forceCommand: true,
             title,
-            deadlineIso: '',
-            deadlineDisplay: '',
+            deadlineIso: dateInfo?.iso || '',
+            deadlineDisplay: dateInfo?.display || '',
+            lineAssigneeNames,
+            lineRelatedNames,
             rawText: compactText,
-            hasDeadlineSignal: false,
+            hasDeadlineSignal: Boolean(dateInfo?.iso),
             hasQuestion: false,
             keywordHits: 1
         };
@@ -402,6 +490,11 @@ function parseTaggedLineTaskCandidate(rawText = '') {
     const taskSegment = ccBoundaryIndex >= 0
         ? compactText.slice(0, ccBoundaryIndex).trim()
         : compactText;
+    const ccSegment = ccBoundaryIndex >= 0
+        ? compactText.slice(ccBoundaryIndex).trim()
+        : '';
+    const lineAssigneeNames = extractMentionNames(taskSegment);
+    const lineRelatedNames = extractMentionNames(ccSegment);
 
     let title = stripLeadingBotMentions(taskSegment)
         .replace(/^\/?(?:ai|ask|ถาม|ไอน่า)\s*/iu, '')
@@ -425,6 +518,8 @@ function parseTaggedLineTaskCandidate(rawText = '') {
         title,
         deadlineIso: dateInfo?.iso || '',
         deadlineDisplay: dateInfo?.display || '',
+        lineAssigneeNames,
+        lineRelatedNames,
         rawText: compactText,
         hasDeadlineSignal,
         hasQuestion,
