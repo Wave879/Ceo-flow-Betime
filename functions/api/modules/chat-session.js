@@ -151,9 +151,7 @@ function buildChatHistoryPrompt(history = [], userMessage = '') {
 }
 
 async function askSoundwave(userMessage, env, history = []) {
-    const prompt = buildChatHistoryPrompt(history, userMessage);
-    const { generateAIReply } = await import('./ai-reply.js');
-    return generateAIReply(prompt || String(userMessage || '').trim(), env, 'secretary');
+    return 'โหมด AI ถูกปิดใช้งานชั่วคราวค่ะ ตอนนี้รองรับเฉพาะคำสั่งระบบ เช่น /สั่ง, /แจ้งงาน, /ซิงข้อมูลกลุ่ม';
 }
 
 export {

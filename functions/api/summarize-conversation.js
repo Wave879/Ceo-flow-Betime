@@ -254,25 +254,8 @@ export async function onRequest({ request, env }) {
             : `หมายเหตุระบบ: ส่งบทสนทนา ${rows.length} ข้อความครบถ้วน`
     ].join('\n');
 
-    try {
-        const summary = await generateSummaryWithAzureOpenAI({ env, userPrompt });
-
-        return jsonResponse({
-            success: true,
-            summary,
-            source: {
-                groupId,
-                totalMessages: rows.length,
-                usedMessages: context.usedMessages,
-                droppedMessages: context.droppedMessages,
-                truncated: context.truncated
-            }
-        }, 200);
-    } catch (err) {
-        console.error('Summarize conversation failed:', err);
-        return jsonResponse({
-            error: 'SUMMARIZE_FAILED',
-            detail: err?.message || 'Unable to summarize conversation'
-        }, 500);
-    }
+    return jsonResponse({
+        error: 'AI_DISABLED',
+        detail: 'โหมด AI ถูกปิดใช้งานชั่วคราว'
+    }, 503);
 }

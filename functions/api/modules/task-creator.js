@@ -35,25 +35,19 @@ import {
 } from './mention-processor.js';
 import { isLikelyLineUserId, getEmployeeDocIdFromLineUserId, fetchLineProfile } from './line-api.js';
 import {
-    isTaggedTaskAiEnabled,
-    shouldRunTaggedTaskAiFallback,
-    parseTaggedLineTaskCandidateWithAI,
-    shouldRunAiForGeneralMessages,
     normalizeProbability,
     normalizeIsoDateString,
     formatIsoDateDisplay
 } from './ai-task-detection.js';
 import {
-    resolveReplyInsightAiMode,
-    isReplyInsightAiEnabled,
     resolveReplyInsightAiConfidenceThreshold,
-    normalizeReplyAiSuggestedStatus,
-    parseReplyInsightWithAI
+    normalizeReplyAiSuggestedStatus
 } from './ai-reply-insight.js';
 import { buildMessagePreviewText } from './message-persistence.js';
 import { fsGetDoc as _fsGetDoc } from './firestore.js';
 
 const LINE_TASK_SOURCE_TYPES = new Set(['line-meeting-summary', 'line-tagged-task']);
+const AI_CALLS_DISABLED = true;
 
 function isSupportedLineTaskSource(source = '') {
     const normalizedSource = String(source || '').trim().toLowerCase();
@@ -400,33 +394,6 @@ async function tryCreateTaggedLineTask(event, env, options = {}) {
         }
     }
 
-    const shouldRunAiFallback = false; // DISABLED: Azure too slow + unreliable. Use keyword detection only.
-
-    if (shouldRunAiFallback && !options?.dryRun) {
-        const aiCandidate = await parseTaggedLineTaskCandidateWithAI(messageText, env).catch((err) => ({
-            matched: false,
-            reason: 'ai-exception',
-            aiError: err?.message || String(err)
-        }));
-
-        if (aiCandidate?.matched) {
-            parsedCandidate = aiCandidate;
-        } else if (String(aiCandidate?.reason || '').startsWith('ai-')) {
-            const aiReason = aiCandidate.reason || '';
-            parsedCandidate = {
-                ...parsedCandidate,
-                matched: false,
-                reason: aiReason,
-                aiConfidence: aiCandidate.aiConfidence,
-                aiThreshold: aiCandidate.aiThreshold,
-                aiMediumThreshold: aiCandidate.aiMediumThreshold,
-                aiBand: aiCandidate.aiBand,
-                aiTitle: aiCandidate.aiTitle || '',
-                ambiguityFlags: Array.isArray(aiCandidate.ambiguityFlags) ? aiCandidate.ambiguityFlags : []
-            };
-        }
-    }
-
     if (options?.dryRun && options?.dryRunAiResult && !(parsedCandidate.aiConfidence > 0)) {
         const aiCandidate = options.dryRunAiResult;
         parsedCandidate = {
@@ -458,38 +425,10 @@ async function tryCreateTaggedLineTask(event, env, options = {}) {
     console.log('🔍 Tagged task parser summary:', debugSummary);
 
     if (!parsedCandidate.matched) {
-        console.log('🔍 Tagged task skipped - trying general message AI:', {
+        console.log('🔍 Tagged task skipped (AI fallback disabled):', {
             ...debugSummary,
             skippedReason: String(parsedCandidate.reason || 'not-tasklike')
         });
-        
-        // Try general message AI if enabled
-        const shouldUseGeneralMessageAi = shouldRunAiForGeneralMessages(messageText, env);
-        console.log('🤖 General message AI eligibility:', {
-            eligible: shouldUseGeneralMessageAi,
-            textLength: messageText.length,
-            textPreview: messageText.slice(0, 80)
-        });
-        
-        if (shouldUseGeneralMessageAi && !options?.dryRun) {
-            console.log('🤖 Invoking AI for general message...');
-            const aiCandidate = await parseTaggedLineTaskCandidateWithAI(messageText, env).catch((err) => ({
-                matched: false,
-                reason: 'ai-exception',
-                aiError: err?.message || String(err)
-            }));
-            
-            console.log('🤖 General message AI result:', {
-                matched: Boolean(aiCandidate?.matched),
-                reason: String(aiCandidate?.reason || ''),
-                confidence: Number(aiCandidate?.aiConfidence || 0)
-            });
-            
-            if (aiCandidate?.matched) {
-                console.log('🤖 AI match! Creating task from general message');
-                parsedCandidate = aiCandidate;
-            }
-        }
         
         // If still no match, return failure
         if (!parsedCandidate.matched) {
@@ -770,22 +709,14 @@ async function tryRecordMeetingSummaryTaskReply(event, env, options = {}) {
     const replyPreviewText = text || buildMessagePreviewText(messageType, event?.message || {}, text);
     const actorName = await resolveSenderDisplayName(lineUserId, projectId, env);
 
-    const replyAiInsight = messageType === 'text'
-        ? await parseReplyInsightWithAI(replyPreviewText, taskFields, env).catch((err) => ({
-            matched: false,
-            reason: 'ai-exception',
-            mode: resolveReplyInsightAiMode(env),
-            confidence: 0,
-            aiError: err?.message || String(err)
-        }))
-        : {
-            matched: false,
-            reason: 'ai-non-text',
-            mode: resolveReplyInsightAiMode(env),
-            confidence: 0
-        };
+    const replyAiInsight = {
+        matched: false,
+        reason: AI_CALLS_DISABLED ? 'ai-disabled' : 'ai-non-text',
+        mode: 'off',
+        confidence: 0
+    };
 
-    const replyAiMode = replyAiInsight.mode || resolveReplyInsightAiMode(env);
+    const replyAiMode = 'off';
     const replyAiConfidence = normalizeProbability(replyAiInsight.confidence, 0);
     const replyAiThreshold = resolveReplyInsightAiConfidenceThreshold(env);
     const canAutoApplyReplyInsight = replyAiMode === 'auto'

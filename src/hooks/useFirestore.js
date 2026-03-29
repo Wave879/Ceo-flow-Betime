@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { collection, doc, addDoc, updateDoc, deleteDoc, onSnapshot } from 'firebase/firestore';
+import { collection, doc, addDoc, updateDoc, deleteDoc, onSnapshot, getDocs, query, where } from 'firebase/firestore';
 import { db, hasFirebaseConfig } from '../firebase';
 import { initialEmployees, initialPositions, initialTasks, EMPLOYEE_COLORS } from '../data/initialData';
 
@@ -69,7 +69,15 @@ export function useFirestore() {
             console.log('🔥 Attempting Firebase connection...');
             try {
                 const unsub1 = onSnapshot(collection(db, 'tasks'), snap => {
-                    const data = snap.docs.map(d => normalizeTask({ id: d.id, ...d.data() }));
+                    const data = snap.docs.map(d => {
+                        const raw = d.data() || {};
+                        return normalizeTask({
+                            ...raw,
+                            id: d.id,
+                            docId: d.id,
+                            sourceId: raw.id || d.id
+                        });
+                    });
                     setTasks(data);
                     saveLS(LS_KEYS.tasks, data);
                     console.log(`✅ Loaded ${data.length} tasks from Firebase`);
@@ -261,7 +269,10 @@ export function useFirestore() {
         });
     }, []);
 
-    const deleteTask = useCallback(async (id) => {
+    const deleteTask = useCallback(async (taskOrId) => {
+        const id = typeof taskOrId === 'string'
+            ? taskOrId.trim()
+            : String(taskOrId?.id || '').trim();
         if (!id) {
             console.warn('❌ deleteTask: missing id');
             return;
@@ -279,7 +290,23 @@ export function useFirestore() {
                     errorCode: err.code,
                     errorMessage: err.message
                 });
-                // Don't return - still update local
+
+                // Fallback: some legacy docs store the logical id in field "id"
+                // while Firestore document id is different.
+                try {
+                    const q = query(collection(db, 'tasks'), where('id', '==', id));
+                    const snap = await getDocs(q);
+                    if (!snap.empty) {
+                        await Promise.all((snap.docs || []).map((row) => deleteDoc(row.ref)));
+                        firebaseSuccess = true;
+                        console.log(`✅ Task deleted via fallback query for id=${id}, docs=${snap.size}`);
+                    }
+                } catch (fallbackErr) {
+                    console.error(`❌ Fallback delete failed for id=${id}:`, {
+                        errorCode: fallbackErr.code,
+                        errorMessage: fallbackErr.message
+                    });
+                }
             }
         } else {
             console.warn('⚠️ Firebase DB not initialized - task delete may not persist');

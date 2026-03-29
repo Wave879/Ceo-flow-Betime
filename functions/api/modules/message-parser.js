@@ -359,10 +359,11 @@ function parseTaggedLineTaskCandidate(rawText = '') {
         }
     }
 
-    const hasForceCommand = /(?:^|\s)\/สั่ง(?:\s|$)/u.test(compactText);
+    // Treat /สั่ง as force-command wherever it appears in the message.
+    const hasForceCommand = /[\/／]สั่ง/u.test(compactText);
     if (hasForceCommand) {
         const cleanTitle = compactText
-            .replace(/\/สั่ง/gu, '')
+            .replace(/[\/／]สั่ง/gu, '')
             .replace(/\s+/g, ' ')
             .trim();
         const ccBoundaryIndex = findCcBoundaryIndex(cleanTitle);
