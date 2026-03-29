@@ -2645,7 +2645,7 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
                                                         setSelectedTask(task);
                                                     }
                                                 }}
-                                                className="group relative border-l-4 pl-4 py-3 cursor-pointer transition-all hover:bg-slate-50/50 dark:hover:bg-slate-800/30 rounded-r-lg"
+                                                className="group relative border-l-4 border border-slate-200/70 dark:border-slate-700/50 pl-4 py-3 px-3 cursor-pointer transition-all hover:bg-slate-50/80 dark:hover:bg-slate-800/50 rounded-lg bg-white/50 dark:bg-slate-800/20"
                                                 style={{ borderLeftColor: accentColor }}
                                             >
                                                 <div className="flex items-start justify-between gap-3">
