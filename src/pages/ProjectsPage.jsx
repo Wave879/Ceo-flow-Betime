@@ -2716,7 +2716,7 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
                         }
                     }}
                 >
-                    <div className={`w-full max-w-5xl h-[88vh] rounded-3xl border border-slate-200/70 dark:border-white/10 bg-white dark:bg-slate-900 shadow-2xl overflow-hidden flex flex-col transition-all duration-200 ease-out transform-gpu ${isLineSendPopupVisible ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-3 scale-[0.98]'}`}>
+                    <div className={`w-full max-w-6xl h-[90vh] rounded-3xl border border-slate-200/70 dark:border-white/10 bg-white dark:bg-slate-900 shadow-2xl overflow-hidden flex flex-col transition-all duration-200 ease-out transform-gpu ${isLineSendPopupVisible ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-3 scale-[0.98]'}`}>
                         <div className="px-4 sm:px-5 py-3.5 border-b border-slate-200/70 dark:border-slate-700/80 flex items-center justify-between">
                             <div>
                                 <p className="text-xs font-semibold text-slate-500 dark:text-slate-400">หน้าแชทกลุ่ม</p>
@@ -2732,11 +2732,11 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
                             </button>
                         </div>
 
-                        <div className="flex-1 p-3 sm:p-4 bg-gradient-to-b from-slate-50/90 via-sky-50/40 to-indigo-50/60 dark:from-slate-900/60 dark:via-slate-900/50 dark:to-indigo-950/30 min-h-0">
+                        <div className="flex-1 p-4 sm:p-6 bg-gradient-to-b from-slate-50/90 via-sky-50/40 to-indigo-50/60 dark:from-slate-900/60 dark:via-slate-900/50 dark:to-indigo-950/30 min-h-0">
                             <div className="rounded-[1.35rem] border border-slate-200/80 dark:border-slate-700/80 bg-white/90 dark:bg-slate-900/85 h-full flex flex-col overflow-hidden shadow-[0_22px_54px_-32px_rgba(15,23,42,0.45)]">
                                 <div
                                     ref={lineSendModalChatScrollRef}
-                                    className="flex-1 overflow-y-auto custom-scroll overscroll-y-contain p-3 bg-[radial-gradient(circle_at_top_left,_rgba(56,189,248,0.18),_transparent_45%),radial-gradient(circle_at_bottom_right,_rgba(249,115,22,0.14),_transparent_45%)] dark:bg-[radial-gradient(circle_at_top_left,_rgba(14,165,233,0.18),_transparent_45%),radial-gradient(circle_at_bottom_right,_rgba(79,70,229,0.18),_transparent_45%)]"
+                                    className="flex-1 overflow-y-auto custom-scroll overscroll-y-contain px-4 sm:px-8 py-4 sm:py-6 bg-[radial-gradient(circle_at_top_left,_rgba(56,189,248,0.18),_transparent_45%),radial-gradient(circle_at_bottom_right,_rgba(249,115,22,0.14),_transparent_45%)] dark:bg-[radial-gradient(circle_at_top_left,_rgba(14,165,233,0.18),_transparent_45%),radial-gradient(circle_at_bottom_right,_rgba(79,70,229,0.18),_transparent_45%)]"
                                 >
                                     {messagesLoading ? (
                                         <p className="text-xs text-slate-500 dark:text-slate-300">กำลังโหลดประวัติแชท...</p>
@@ -2829,7 +2829,7 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
                                                         <div className={`flex items-end gap-1.5 ${isBotMessage ? 'flex-row-reverse' : 'flex-row'}`}>
                                                             <div
                                                                 data-line-message-id={lineMessageId}
-                                                                className={`max-w-[76vw] sm:max-w-[440px] border px-3 py-2.5 text-sm break-words shadow-[0_8px_20px_-16px_rgba(15,23,42,0.5)] ${bubbleTone} ${bubbleShape} ${isHighlightedMessage ? 'ring-2 ring-red-400/80 dark:ring-red-500/80' : ''}`}
+                                                                className={`max-w-[95%] sm:max-w-[70%] border px-4 py-3 text-base break-words shadow-[0_8px_20px_-16px_rgba(15,23,42,0.5)] leading-relaxed ${bubbleTone} ${bubbleShape} ${isHighlightedMessage ? 'ring-2 ring-red-400/80 dark:ring-red-500/80' : ''}`}
                                                             >
                                                                 {quotedMessageId && (
                                                                     <div className="mb-2 rounded-lg border border-slate-200/90 bg-slate-50/90 px-2.5 py-1.5 dark:border-slate-600/80 dark:bg-slate-800/75">
@@ -2998,7 +2998,7 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
                                 </div>
 
                                 <form
-                                    className="sticky bottom-0 px-3 py-2.5 border-t border-slate-200/70 dark:border-slate-700/80 bg-white/95 dark:bg-slate-900/95 backdrop-blur"
+                                    className="sticky bottom-0 px-4 sm:px-8 py-4 sm:py-5 border-t border-slate-200/70 dark:border-slate-700/80 bg-white/95 dark:bg-slate-900/95 backdrop-blur"
                                     onSubmit={(event) => {
                                         event.preventDefault();
                                         handleSendGroupMessage();
@@ -3023,14 +3023,14 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
                                         </div>
                                     )}
 
-                                    <div className="flex items-center gap-2 rounded-2xl border border-slate-200/90 dark:border-slate-700 bg-slate-50/90 dark:bg-slate-800/90 px-2.5 py-1.5 shadow-sm">
+                                    <div className="flex items-center gap-2 rounded-2xl border border-slate-200/90 dark:border-slate-700 bg-slate-50/90 dark:bg-slate-800/90 px-4 py-3 shadow-sm">
                                         <input
                                             ref={lineSendModalInputRef}
                                             type="text"
                                             value={outgoingMessage}
                                             onChange={(event) => setOutgoingMessage(event.target.value)}
                                             placeholder="พิมพ์ข้อความ..."
-                                            className="flex-1 bg-transparent text-sm text-slate-800 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none"
+                                            className="flex-1 bg-transparent text-base text-slate-800 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none"
                                             disabled={!selectedGroup || sendingMessage}
                                             maxLength={2000}
                                         />
@@ -3038,14 +3038,14 @@ export default function ProjectsPage({ tasks, employees, projects = [], onUpdate
                                         <button
                                             type="submit"
                                             disabled={!canSendGroupMessage}
-                                            className="w-9 h-9 rounded-full bg-gradient-to-br from-[#24387E] to-[#3F5BC7] text-white flex items-center justify-center hover:brightness-110 disabled:from-slate-300 disabled:to-slate-300 disabled:text-slate-500 disabled:cursor-not-allowed"
+                                            className="w-10 h-10 rounded-full bg-gradient-to-br from-[#24387E] to-[#3F5BC7] text-white flex items-center justify-center hover:brightness-110 disabled:from-slate-300 disabled:to-slate-300 disabled:text-slate-500 disabled:cursor-not-allowed transition-all"
                                             aria-label="ส่งข้อความ"
                                         >
-                                            <Send size={14} />
+                                            <Send size={16} />
                                         </button>
                                     </div>
 
-                                    <p className="mt-1 px-2 text-[11px] text-slate-500 dark:text-slate-400">
+                                    <p className="mt-2 px-2 text-[11px] text-slate-500 dark:text-slate-400">
                                         {sendingMessage
                                             ? 'กำลังส่งข้อความ...'
                                             : (replyTarget
