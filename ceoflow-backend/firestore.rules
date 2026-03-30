@@ -4,6 +4,10 @@ service cloud.firestore {
     // Collections used by the dashboard web app and Cloudflare backend.
     match /tasks/{docId} {
       allow read, write: if true;
+
+      match /replies/{replyId} {
+        allow read, write: if true;
+      }
     }
 
     match /employees/{docId} {
