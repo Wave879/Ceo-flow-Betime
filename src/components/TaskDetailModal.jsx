@@ -9,7 +9,7 @@ import {
 import { Avatar, StatusBadge, formatDate } from './UI';
 import { storage, db } from '../firebase';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { collection, query, onSnapshot, where, limit } from 'firebase/firestore';
+import { collection, query, onSnapshot, where, limit, addDoc } from 'firebase/firestore';
 
 const URL_REGEX = /(?:https?:\/\/|www\.)[^\s<>"']+/giu;
 function renderChatText(text = '') {
@@ -497,6 +497,8 @@ export default function TaskDetailModal({ task, employees, onClose, onUpdate, on
     const [linkInput, setLinkInput] = useState('');
     const [linkLabel, setLinkLabel] = useState('');
     const [timelineInput, setTimelineInput] = useState('');
+    const [replyInput, setReplyInput] = useState('');
+    const [replies, setReplies] = useState([]);
     const [timelineAuthorId, setTimelineAuthorId] = useState(task.assignees?.[0] || employees[0]?.id || '');
     const [uploading, setUploading] = useState(false);
     const [activeTab, setActiveTab] = useState('detail'); // detail | timeline | attachments
@@ -912,6 +914,55 @@ export default function TaskDetailModal({ task, employees, onClose, onUpdate, on
         // Cleanup logic goes here when unmounting
     }, [task]);
 
+    // ✅ Subscribe replies from Firestore
+    useEffect(() => {
+        const taskId = String(task?.id || '').trim();
+        const projectId = String(task?.projectId || task?.groupId || '').trim();
+        if (!taskId || !projectId || !db) {
+            setReplies([]);
+            return;
+        }
+
+        const repliesCollection = collection(db, 'tasks', taskId, 'replies');
+        const q = query(repliesCollection);
+        const unsub = onSnapshot(q, (snap) => {
+            const rows = (snap.docs || []).map((doc) => ({
+                id: doc.id,
+                ...doc.data()
+            }));
+            setReplies(rows.sort((a, b) => {
+                const aTime = a.createdAt?.seconds || a.createdAt?.toMillis?.() || 0;
+                const bTime = b.createdAt?.seconds || b.createdAt?.toMillis?.() || 0;
+                return aTime - bTime;
+            }));
+        });
+
+        return () => unsub();
+    }, [task?.id, task?.projectId, task?.groupId]);
+
+    const handleSendReply = async () => {
+        if (!replyInput.trim()) return;
+
+        const taskId = String(task?.id || '').trim();
+        const projectId = String(task?.projectId || task?.groupId || '').trim();
+        if (!taskId || !projectId || !db) return;
+
+        try {
+            const repliesCollection = collection(db, 'tasks', taskId, 'replies');
+            const newReply = {
+                text: replyInput,
+                senderName: employees[0]?.name || 'Unknown',
+                lineUserId: employees[0]?.id || '',
+                createdAt: new Date(),
+                updatedAt: new Date()
+            };
+            await addDoc(repliesCollection, newReply);
+            setReplyInput('');
+        } catch (err) {
+            console.error('❌ Send reply error:', err);
+        }
+    };
+
     const handleJumpToQuestion = () => {
         if (chatPanelColumnRef.current) {
             chatPanelColumnRef.current.scrollIntoView({
@@ -991,6 +1042,7 @@ export default function TaskDetailModal({ task, employees, onClose, onUpdate, on
                     <div className="flex gap-1 px-7 border-b border-slate-100 dark:border-white/10 pb-px transition-colors">
                         {[
                             { key: 'detail', label: 'Details' },
+                            { key: 'replies', label: `คำตอบ (${replies?.length || 0})` },
                         ].map(t => (
                             <button
                                 key={t.key}
@@ -1232,6 +1284,65 @@ export default function TaskDetailModal({ task, employees, onClose, onUpdate, on
                                     <div className="text-center py-6 text-slate-400 dark:text-slate-600 transition-colors">
                                         <Paperclip size={32} className="mx-auto mb-2 opacity-30 dark:opacity-20" />
                                         <p className="text-sm">No attachments yet</p>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                        {/* REPLIES TAB */}
+                        {activeTab === 'replies' && (
+                            <div className="space-y-4">
+                                {/* Reply input area */}
+                                <div className="rounded-2xl border border-blue-100 dark:border-blue-900/50 bg-blue-50 dark:bg-blue-900/10 p-4 transition-colors">
+                                    <h3 className="text-xs font-bold text-blue-600 dark:text-blue-400 uppercase tracking-wider mb-3">
+                                        ตอบกลับปัญหาหรือคำถาม
+                                    </h3>
+                                    <div className="space-y-2">
+                                        <textarea
+                                            className="input-field resize-none min-h-[92px] text-sm"
+                                            placeholder="พิมพ์คำตอบหรือข้อมูลเพิ่มเติมสำหรับงานนี้..."
+                                            value={replyInput}
+                                            onChange={(e) => setReplyInput(e.target.value)}
+                                        />
+                                        <div className="flex justify-end">
+                                            <button
+                                                onClick={handleSendReply}
+                                                disabled={!replyInput.trim()}
+                                                className="btn-primary disabled:opacity-50 disabled:cursor-not-allowed"
+                                            >
+                                                <Plus size={14} /> ส่งคำตอบ
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Replies list */}
+                                {replies.length > 0 ? (
+                                    <div>
+                                        <h3 className="text-xs font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-3 transition-colors">คำตอบที่รับ ({replies.length})</h3>
+                                        <div className="space-y-3">
+                                            {replies.map((reply) => (
+                                                <div key={reply.id} className="rounded-2xl border border-slate-100 dark:border-white/10 bg-slate-50 dark:bg-white/5 p-4 transition-colors">
+                                                    <div className="flex items-start justify-between gap-3 mb-2">
+                                                        <p className="text-sm font-semibold text-slate-800 dark:text-slate-200 transition-colors">{reply.senderName || 'Unknown'}</p>
+                                                        <span className="text-[11px] text-slate-400 dark:text-slate-500 whitespace-nowrap">
+                                                            {reply.createdAt ? new Date(reply.createdAt).toLocaleString('th-TH', {
+                                                                year: 'numeric',
+                                                                month: 'short',
+                                                                day: 'numeric',
+                                                                hour: '2-digit',
+                                                                minute: '2-digit'
+                                                            }) : '-'}
+                                                        </span>
+                                                    </div>
+                                                    <p className="text-sm leading-relaxed text-slate-600 dark:text-slate-300 whitespace-pre-wrap break-words">{reply.text}</p>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <div className="text-center py-6 text-slate-400 dark:text-slate-600 transition-colors">
+                                        <MessageCircle size={32} className="mx-auto mb-2 opacity-30 dark:opacity-20" />
+                                        <p className="text-sm">ยังไม่มีคำตอบ</p>
                                     </div>
                                 )}
                             </div>

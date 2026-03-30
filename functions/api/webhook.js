@@ -422,12 +422,20 @@ function createGroupDeadlineFlex(groupName = '', tasks = [], appUrl = 'https://c
                         style: 'primary',
                         height: 'sm',
                         color: '#22C55E',
-                        action: { type: 'postback', label: 'ได้รับคำตอบแล้ว', data: 'action=task_answered' }
+                        action: { 
+                            type: 'postback', 
+                            label: 'ได้รับคำตอบแล้ว', 
+                            data: `action=task_answered&taskId=${tasks[0]?._id || ''}&taskIndex=1`
+                        }
                     },
                     {
                         type: 'button',
                         style: 'secondary',
-                        action: { type: 'postback', label: 'เลื่อน แจ้งเตือนอีก 1 วัน', data: 'action=task_postpone' }
+                        action: { 
+                            type: 'postback', 
+                            label: 'เลื่อน แจ้งเตือนอีก 1 วัน', 
+                            data: `action=task_postpone&taskId=${tasks[0]?._id || ''}&taskIndex=1`
+                        }
                     }
                 ]
             }
@@ -458,79 +466,66 @@ async function handlePostback(event, env) {
             return;
         }
 
-        // Parse postback data format: action=task_answered or action=task_postpone
+        // Parse postback data format: action=task_answered&taskId=xxx or action=task_postpone&taskId=xxx
         const params = new URLSearchParams(postbackData);
         const action = String(params.get('action') || '').trim().toLowerCase();
+        const taskId = String(params.get('taskId') || '').trim();
+
+        if (!taskId) {
+            await replyText(replyToken, '❌ ไม่พบ taskId', env).catch(() => {});
+            return;
+        }
 
         if (action === 'task_answered') {
-            // Mark all pending tasks as "pending-delete"
-            if (!groupId) return;
+            // Mark THIS task as "pending-delete"
+            await patchFirestoreDoc(`tasks/${taskId}`, {
+                status: fsString('pending-delete'),
+                updatedAt: { timestampValue: new Date().toISOString() }
+            }, env, false).catch(() => {});
 
-            const docs = await fsRunQuery({
-                structuredQuery: {
-                    from: [{ collectionId: 'tasks' }],
-                    where: {
-                        fieldFilter: {
-                            field: { fieldPath: 'projectId' },
-                            op: 'EQUAL',
-                            value: { stringValue: groupId }
-                        }
-                    }
-                }
-            }, env);
+            await replyText(replyToken, '✅ ตอบรับทราบ! งานนี้จัดเก็บแล้ว', env).catch(() => {});
+            console.log(`✅ Task answered: ${taskId}`);
 
-            let updated = 0;
-            for (const doc of docs) {
-                const status = String(doc?.status || '').trim().toLowerCase();
-                if (status !== 'completed' && status !== 'abandoned' && status !== 'pending-delete') {
-                    await patchFirestoreDoc(`tasks/${doc._id}`, {
-                        status: fsString('pending-delete'),
-                        updatedAt: { timestampValue: new Date().toISOString() }
-                    }, env, false).catch(() => {});
-                    updated++;
+            // Fetch remaining tasks
+            if (groupId) {
+                const tasks = await queryGroupNotificationCandidates(groupId, env, true);
+                if (tasks.length > 0) {
+                    const appUrl = env.WEB_APP_URL || env.APP_URL || 'https://ceoflow.pages.dev';
+                    const brandImageUrl = env.BRAND_IMAGE_URL || env.FLEX_BRAND_IMAGE_URL || '';
+                    const groupSummary = await getGroupSummary(groupId, env);
+                    const payload = createGroupDeadlineFlex(groupSummary?.name || `LINE GROUP ${groupId.slice(-6)}`, tasks, appUrl, brandImageUrl);
+                    await replyFlex(replyToken, payload, env, { groupId, saveToChat: true }).catch(() => {});
+                } else {
+                    await pushText(groupId, '✅ ยินดีด้วย! งานทั้งหมดเรียบร้อยแล้ว', env, { groupId, saveToChat: true }).catch(() => {});
                 }
             }
-
-            const msg = `✅ ตอบรับทราบ! จัดเก็บ ${updated} งาน รอลบ`;
-            await replyText(replyToken, msg, env).catch(() => {});
-            console.log(`✅ Task answered: updated ${updated} tasks to pending-delete`);
             return;
         }
 
         if (action === 'task_postpone') {
-            // Postpone all pending tasks to next working day
-            if (!groupId) return;
-
-            const docs = await fsRunQuery({
-                structuredQuery: {
-                    from: [{ collectionId: 'tasks' }],
-                    where: {
-                        fieldFilter: {
-                            field: { fieldPath: 'projectId' },
-                            op: 'EQUAL',
-                            value: { stringValue: groupId }
-                        }
-                    }
-                }
-            }, env);
-
-            let updated = 0;
+            // Postpone THIS task to next working day
             const nextDay = getNextWorkingDay(formatDateKeyInBangkok(new Date()));
+            await patchFirestoreDoc(`tasks/${taskId}`, {
+                deadline: fsString(nextDay),
+                updatedAt: { timestampValue: new Date().toISOString() }
+            }, env, false).catch(() => {});
 
-            for (const doc of docs) {
-                const status = String(doc?.status || '').trim().toLowerCase();
-                if (status !== 'completed' && status !== 'abandoned') {
-                    await patchFirestoreDoc(`tasks/${doc._id}`, {
-                        deadline: fsString(nextDay),
-                        updatedAt: { timestampValue: new Date().toISOString() }
-                    }, env, false).catch(() => {});
-                    updated++;
+            await replyText(replyToken, `✅ ตอบรับทราบ! เลื่อนแจ้งเตือนงานนี้ไปวัน ${nextDay}`, env).catch(() => {});
+            console.log(`✅ Task postponed: ${taskId} to ${nextDay}`);
+
+            // Fetch remaining tasks
+            if (groupId) {
+                const tasks = await queryGroupNotificationCandidates(groupId, env, true);
+                if (tasks.length > 0) {
+                    const appUrl = env.WEB_APP_URL || env.APP_URL || 'https://ceoflow.pages.dev';
+                    const brandImageUrl = env.BRAND_IMAGE_URL || env.FLEX_BRAND_IMAGE_URL || '';
+                    const groupSummary = await getGroupSummary(groupId, env);
+                    const payload = createGroupDeadlineFlex(groupSummary?.name || `LINE GROUP ${groupId.slice(-6)}`, tasks, appUrl, brandImageUrl);
+                    await replyFlex(replyToken, payload, env, { groupId, saveToChat: true }).catch(() => {});
+                } else {
+                    await pushText(groupId, '✅ ยินดีด้วย! งานทั้งหมดเรียบร้อยแล้ว', env, { groupId, saveToChat: true }).catch(() => {});
                 }
             }
-
-            const msg = `✅ ตอบรับทราบ! เลื่อนแจ้งเตือน ${updated} งาน ไปวัน ${nextDay}`;
-            await replyText(replyToken, msg, env).catch(() => {});
-            console.log(`✅ Task postponed: updated ${updated} tasks to ${nextDay}`);
             return;
         }
     } catch (err) {
